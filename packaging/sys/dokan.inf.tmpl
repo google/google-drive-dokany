@@ -1,0 +1,50 @@
+[Version]
+Signature         = "$Windows NT$"
+Class             = DiskDrive
+ClassGuid         = {4d36e967-e325-11ce-bfc1-08002be10318}
+Provider          = %ProviderName%
+DriverVer         = %DriverVersion%
+CatalogFile       = %DriverName%.cat
+DriverPackageType = FileSystem
+
+[DestinationDirs]
+DefaultDestDir              = 12
+DokanFileSystem.DriverFiles = 12
+
+[DefaultInstall]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DokanFileSystem.DriverFiles
+
+[DefaultInstall.Services]
+AddService = %DriverName%,,DokanFileSystem.Service
+
+[DefaultUninstall]
+DelFiles   = DokanFileSystem.DriverFiles
+
+[DefaultUninstall.Services]
+DelService = %DriverName%,0x200
+
+[SourceDisksNames]
+1 = %Disk1%
+
+[SourceDisksFiles]
+${DRIVER_NAME}.sys = 1
+
+[DokanFileSystem.DriverFiles]
+%DriverName%.sys
+
+[DokanFileSystem.Service]
+DisplayName    = %DriverName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\%DriverName%.sys
+ServiceType    = 2 ;    SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 1 ;    SERVICE_SYSTEM_START
+ErrorControl   = 1 ;    SERVICE_ERROR_NORMAL
+LoadOrderGroup = "File System"
+
+[Strings]
+ProviderName       = "Dokan"
+DriverName         = "${DRIVER_NAME}"
+DriverVersion      = "${DRIVER_VERSION}"
+Disk1              = "Dokan installation media"
+ServiceDescription = "Dokan kernel-mode file system driver."

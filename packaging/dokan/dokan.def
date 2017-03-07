@@ -1,0 +1,6 @@
+LIBRARY	dokan
+
+EXPORTS
+
+DokanMain
+DokanRemoveMountPoint
