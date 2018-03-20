@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2017 - 2018 Google, Inc.
   Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -26,6 +26,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <conio.h>
 #include <process.h>
 #include <stdlib.h>
+#include <strsafe.h>
 #include <tchar.h>
 
 #define DokanMapKernelBit(dest, src, userBit, kernelBit)                       \
@@ -208,12 +209,10 @@ int DOKANAPI DokanMain(PDOKAN_OPTIONS DokanOptions,
   if (DokanOptions->ThreadCount == 0) {
     DokanOptions->ThreadCount = 5;
 
-  } else if ((DOKAN_MAX_THREAD - 1) < DokanOptions->ThreadCount) {
-    // DOKAN_MAX_THREAD includes DokanKeepAlive thread, so
-    // available thread is DOKAN_MAX_THREAD -1
+  } else if (DOKAN_MAX_THREAD < DokanOptions->ThreadCount) {
     DokanDbgPrintW(L"Dokan Error: too many thread count %d\n",
                    DokanOptions->ThreadCount);
-    DokanOptions->ThreadCount = DOKAN_MAX_THREAD - 1;
+    DokanOptions->ThreadCount = DOKAN_MAX_THREAD;
   }
 
   device = CreateFile(DOKAN_GLOBAL_DEVICE_NAME,           // lpFileName
@@ -262,14 +261,6 @@ int DOKANAPI DokanMain(PDOKAN_OPTIONS DokanOptions,
     return DOKAN_START_ERROR;
   }
 
-  // Start Keep Alive thread
-  threadIds[threadNum++] = (HANDLE)_beginthreadex(NULL, // Security Attributes
-                                                  0,    // stack size
-                                                  DokanKeepAlive,
-                                                  (PVOID)instance, // param
-                                                  0, // create flag
-                                                  NULL);
-
   for (i = 0; i < DokanOptions->ThreadCount; ++i) {
     threadIds[threadNum++] = (HANDLE)_beginthreadex(NULL, // Security Attributes
                                                     0,    // stack size
@@ -286,16 +277,32 @@ int DOKANAPI DokanMain(PDOKAN_OPTIONS DokanOptions,
     return DOKAN_MOUNT_ERROR;
   }
 
+  wchar_t keepalive_path[128];
+  StringCbPrintfW(keepalive_path, sizeof(keepalive_path), L"\\\\?%s%s",
+                  instance->DeviceName, DOKAN_KEEPALIVE_FILE_NAME);
+  HANDLE keepalive_handle = CreateFile(
+      keepalive_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+  if (keepalive_handle == INVALID_HANDLE_VALUE) {
+    // We don't consider this a fatal error because the keepalive handle is only
+    // needed for abnormal termination cases anyway.
+    DbgPrintW(L"Failed to open keepalive file: %s\n", keepalive_path);
+  }
+
+  DWORD keepalive_bytes_returned = 0;
+  BOOL keepalive_active = DeviceIoControl(
+      keepalive_handle, FSCTL_ACTIVATE_KEEPALIVE, NULL, 0, NULL, 0,
+      &keepalive_bytes_returned, NULL);
+  if (!keepalive_active) {
+    DbgPrintW(L"Failed to activate keepalive handle.\n");
+  }
+
   // Here we should have been mounter by mountmanager thanks to
   // IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME
   DbgPrintW(L"mounted: %s -> %s\n", instance->MountPoint, instance->DeviceName);
 
   if (DokanOperations->Mounted) {
-    DOKAN_FILE_INFO fileInfo;
-    RtlZeroMemory(&fileInfo, sizeof(DOKAN_FILE_INFO));
-    fileInfo.DokanOptions = DokanOptions;
-    // ignore return value
-    DokanOperations->Mounted(&fileInfo);
+    DokanOperations->Mounted(instance->DeviceName,
+                             DokanOptions->GlobalContext);
   }
 
   // wait for thread terminations
@@ -305,6 +312,10 @@ int DOKANAPI DokanMain(PDOKAN_OPTIONS DokanOptions,
     CloseHandle(threadIds[i]);
   }
 
+  // Note that the keepalive close that actually has unmounting effect is the
+  // implicit one that happens if the process dies. If this one runs, it will be
+  // a no-op.
+  CloseHandle(keepalive_handle);
   CloseHandle(device);
 
   if (DokanOperations->Unmounted) {
@@ -673,6 +684,21 @@ BOOL SendGlobalReleaseIRP(LPCWSTR MountPoint) {
   return FALSE;
 }
 
+
+// Converts a UUID to a string. This is a very minimal, not quite safe method,
+// but I do not want the dll to link to the system libraries that provide an
+// equivalent.
+// WARNING: The caller must provide an output buffer of at least 40 characters
+// in length.
+void UUIDToString(const GUID guid, char* out) {
+  sprintf(out,
+      "{%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
+      guid.Data1, guid.Data2, guid.Data3,
+      guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+      guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+}
+
+
 BOOL DokanStart(PDOKAN_INSTANCE Instance) {
   EVENT_START eventStart;
   EVENT_DRIVER_INFO driverInfo;
@@ -681,7 +707,7 @@ BOOL DokanStart(PDOKAN_INSTANCE Instance) {
   ZeroMemory(&eventStart, sizeof(EVENT_START));
   ZeroMemory(&driverInfo, sizeof(EVENT_DRIVER_INFO));
 
-  eventStart.UserVersion = (GUID) DOKAN_DRIVER_GUID;
+  eventStart.UserVersion = (UUID) DOKAN_DRIVER_VERSION;
   if (Instance->DokanOptions->Options & DOKAN_OPTION_ALT_STREAM) {
     eventStart.Flags |= DOKAN_EVENT_ALTERNATIVE_STREAM_ON;
   }
@@ -703,6 +729,9 @@ BOOL DokanStart(PDOKAN_INSTANCE Instance) {
   if (Instance->DokanOptions->Options & DOKAN_OPTION_FILELOCK_USER_MODE) {
     eventStart.Flags |= DOKAN_EVENT_FILELOCK_USER_MODE;
   }
+  if (Instance->DokanOptions->Options & DOKAN_OPTION_LOCK_DEBUG_ENABLED) {
+    eventStart.Flags |= DOKAN_EVENT_LOCK_DEBUG_ENABLED;
+  }
 
   memcpy_s(eventStart.MountPoint, sizeof(eventStart.MountPoint),
            Instance->MountPoint, sizeof(Instance->MountPoint));
@@ -711,14 +740,35 @@ BOOL DokanStart(PDOKAN_INSTANCE Instance) {
 
   eventStart.IrpTimeout = Instance->DokanOptions->Timeout;
 
+  eventStart.VolumeSecurityDescriptorLength =
+      Instance->DokanOptions->VolumeSecurityDescriptorLength;
+  if (eventStart.VolumeSecurityDescriptorLength
+      > VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE) {
+    DokanDbgPrint("Volume security descriptor is too large."
+                  " Actual: %u, supported: %u",
+                  eventStart.VolumeSecurityDescriptorLength,
+                  VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE);
+    return FALSE;
+  } else if (eventStart.VolumeSecurityDescriptorLength != 0) {
+    memcpy(eventStart.VolumeSecurityDescriptor,
+           Instance->DokanOptions->VolumeSecurityDescriptor,
+           eventStart.VolumeSecurityDescriptorLength);
+  }
+
   SendToDevice(DOKAN_GLOBAL_DEVICE_NAME, IOCTL_EVENT_START, &eventStart,
                sizeof(EVENT_START), &driverInfo, sizeof(EVENT_DRIVER_INFO),
                &returnedLength);
 
   if (driverInfo.Status == DOKAN_START_FAILED) {
     if (!IsEqualGUID(&driverInfo.DriverVersion, &eventStart.UserVersion)) {
-      DokanDbgPrint("Dokan Error: driver version mismatch, driver %X, dll %X\n",
-                    driverInfo.DriverVersion, eventStart.UserVersion);
+      // DokanDbgPrint("Dokan Error: driver version mismatch, driver %X, dll %X\n",
+      //               driverInfo.DriverVersion, eventStart.UserVersion);
+      char d_ver[50];  // Long enough
+      UUIDToString(driverInfo.DriverVersion, d_ver);
+      char u_ver[50];  // Long enough
+      UUIDToString(eventStart.UserVersion, u_ver);
+      DokanDbgPrint("Dokan Error: driver version mismatch, driver %s, dll %s\n",
+                    d_ver, u_ver);
     } else {
       DokanDbgPrint("Dokan Error: driver start error\n");
     }

@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2017 - 2018 Google, Inc.
   Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -21,6 +21,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+
+#include "googledrivefs_msg.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
@@ -81,60 +83,90 @@ DokanFastIoRead(__in PFILE_OBJECT FileObject, __in PLARGE_INTEGER FileOffset,
 
 FAST_IO_ACQUIRE_FILE DokanAcquireForCreateSection;
 VOID DokanAcquireForCreateSection(__in PFILE_OBJECT FileObject) {
-  PFSRTL_ADVANCED_FCB_HEADER header;
-
-  header = FileObject->FsContext;
-  if (header && header->Resource) {
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(header->Resource, TRUE);
+  PDokanCCB ccb = (PDokanCCB)FileObject->FsContext2;
+  if (ccb != NULL) {
+    DokanFCBLockRW(ccb->Fcb);
     KeLeaveCriticalRegion();
   }
-
   DDbgPrint("DokanAcquireForCreateSection\n");
 }
 
 FAST_IO_RELEASE_FILE DokanReleaseForCreateSection;
 VOID DokanReleaseForCreateSection(__in PFILE_OBJECT FileObject) {
-  PFSRTL_ADVANCED_FCB_HEADER header;
-
-  header = FileObject->FsContext;
-  if (header && header->Resource) {
+  PDokanCCB ccb = (PDokanCCB)FileObject->FsContext2;
+  if (ccb != NULL) {
     KeEnterCriticalRegion();
-    ExReleaseResourceLite(header->Resource);
-    KeLeaveCriticalRegion();
+    DokanFCBUnlock(ccb->Fcb);
   }
 
   DDbgPrint("DokanReleaseForCreateSection\n");
+}
+
+FAST_IO_ACQUIRE_FOR_CCFLUSH DokanAcquireForCcFlush;
+NTSTATUS DokanAcquireForCcFlush(__in PFILE_OBJECT FileObject,
+                                __in PDEVICE_OBJECT DeviceObject) {
+  // This does the same locking that the FsRtlAcquireFileForCcFlushEx call
+  // within CcFlushCache would be doing, if we did not bother implementing
+  // this function. The only point of implementing it is because our specific
+  // incantation for acquiring the same locks will get this instrumented when
+  // --enable_lock_debugging is on. In places where we need the FCB lock more
+  // broadly, we acquire it at the CcFlushCache call site.
+  UNREFERENCED_PARAMETER(DeviceObject);
+  PDokanCCB ccb = (PDokanCCB)FileObject->FsContext2;
+  if (ccb != NULL) {
+    if (ExIsResourceAcquiredSharedLite(ccb->Fcb->AdvancedFCBHeader.Resource)) {
+      DokanFCBLockRO(ccb->Fcb);
+    } else {
+      DokanFCBLockRW(ccb->Fcb);
+    }
+    DokanPagingIoLockRO(ccb->Fcb);
+    // Both of the lock acquisition calls above enter a critical region. We want
+    // to leave the critical region index at the value we had on entry.
+    KeLeaveCriticalRegion();
+    KeLeaveCriticalRegion();
+  }
+  return STATUS_SUCCESS;
+}
+
+FAST_IO_RELEASE_FOR_CCFLUSH DokanReleaseForCcFlush;
+NTSTATUS DokanReleaseForCcFlush(__in PFILE_OBJECT FileObject,
+                                __in PDEVICE_OBJECT DeviceObject) {
+  // See the comment in DokanAcquireForCcFlush.
+  UNREFERENCED_PARAMETER(DeviceObject);
+  PDokanCCB ccb = (PDokanCCB)FileObject->FsContext2;
+  if (ccb != NULL) {
+    // Both of the unlock calls below expect to be in their own critical region
+    // index.
+    KeEnterCriticalRegion();
+    KeEnterCriticalRegion();
+    DokanPagingIoUnlock(ccb->Fcb);
+    DokanFCBUnlock(ccb->Fcb);
+  }
+  return STATUS_SUCCESS;
 }
 
 NTSTATUS
 DokanFilterCallbackAcquireForCreateSection(__in PFS_FILTER_CALLBACK_DATA
                                                CallbackData,
                                            __out PVOID *CompletionContext) {
-  PFSRTL_ADVANCED_FCB_HEADER header;
-  PDokanFCB fcb = NULL;
   PDokanCCB ccb;
 
   UNREFERENCED_PARAMETER(CompletionContext);
 
   DDbgPrint("DokanFilterCallbackAcquireForCreateSection\n");
 
-  header = CallbackData->FileObject->FsContext;
   ccb = CallbackData->FileObject->FsContext2;
 
-  if (ccb)
-    fcb = ccb->Fcb;
-
-  if (header && header->Resource) {
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(header->Resource, TRUE);
+  if (ccb != NULL) {
+    DokanFCBLockRW(ccb->Fcb);
     KeLeaveCriticalRegion();
   }
 
-  if (CallbackData->Parameters.AcquireForSectionSynchronization.SyncType !=
+  if (ccb == NULL ||
+      CallbackData->Parameters.AcquireForSectionSynchronization.SyncType !=
       SyncTypeCreateSection) {
     return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
-  } else if (fcb && fcb->ShareAccess.Writers == 0) {
+  } else if (ccb->Fcb->ShareAccess.Writers == 0) {
     return STATUS_FILE_LOCKED_WITH_ONLY_READERS;
   } else {
     return STATUS_FILE_LOCKED_WITH_WRITERS;
@@ -157,6 +189,24 @@ DokanLookasideCreate(LOOKASIDE_LIST_EX *pCache, size_t cbElement) {
   }
 
   return TRUE;
+}
+
+VOID CleanupGlobalDiskDevice(PDOKAN_GLOBAL dokanGlobal) {
+  WCHAR symbolicLinkBuf[] = DOKAN_GLOBAL_SYMBOLIC_LINK_NAME;
+  UNICODE_STRING symbolicLinkName;
+
+  KeSetEvent(&dokanGlobal->KillDeleteDeviceEvent, 0, FALSE);
+
+  RtlInitUnicodeString(&symbolicLinkName, symbolicLinkBuf);
+  IoDeleteSymbolicLink(&symbolicLinkName);
+
+  IoUnregisterFileSystem(dokanGlobal->FsDiskDeviceObject);
+  IoUnregisterFileSystem(dokanGlobal->FsCdDeviceObject);
+
+  IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
+  IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
+  IoDeleteDevice(dokanGlobal->DeviceObject);
+  ExDeleteResourceLite(&dokanGlobal->Resource);
 }
 
 NTSTATUS
@@ -240,9 +290,7 @@ Return Value:
 
   fastIoDispatch = ExAllocatePool(sizeof(FAST_IO_DISPATCH));
   if (!fastIoDispatch) {
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(dokanGlobal->DeviceObject);
+    CleanupGlobalDiskDevice(dokanGlobal);
     DDbgPrint("  ExAllocatePool failed");
     return STATUS_INSUFFICIENT_RESOURCES;
   }
@@ -256,6 +304,8 @@ Return Value:
   fastIoDispatch->FastIoWrite = FsRtlCopyWrite;
   fastIoDispatch->AcquireFileForNtCreateSection = DokanAcquireForCreateSection;
   fastIoDispatch->ReleaseFileForNtCreateSection = DokanReleaseForCreateSection;
+  fastIoDispatch->AcquireForCcFlush = DokanAcquireForCcFlush;
+  fastIoDispatch->ReleaseForCcFlush = DokanReleaseForCcFlush;
   fastIoDispatch->MdlRead = FsRtlMdlReadDev;
   fastIoDispatch->MdlReadComplete = FsRtlMdlReadCompleteDev;
   fastIoDispatch->PrepareMdlWrite = FsRtlPrepareMdlWriteDev;
@@ -288,34 +338,33 @@ Return Value:
       FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &filterCallbacks);
 
   if (!NT_SUCCESS(status)) {
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(dokanGlobal->DeviceObject);
+    CleanupGlobalDiskDevice(dokanGlobal);
+    ExFreePool(DriverObject->FastIoDispatch);
     DDbgPrint("  FsRtlRegisterFileSystemFilterCallbacks returned 0x%x\n",
               status);
     return status;
   }
 
   if (!DokanLookasideCreate(&g_DokanCCBLookasideList, sizeof(DokanCCB))) {
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(dokanGlobal->DeviceObject);
+    DDbgPrint("  DokanLookasideCreate g_DokanCCBLookasideList  failed");
+    CleanupGlobalDiskDevice(dokanGlobal);
+    ExFreePool(DriverObject->FastIoDispatch);
     return STATUS_INSUFFICIENT_RESOURCES;
   }
 
   if (!DokanLookasideCreate(&g_DokanFCBLookasideList, sizeof(DokanFCB))) {
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(dokanGlobal->DeviceObject);
+    DDbgPrint("  DokanLookasideCreate g_DokanFCBLookasideList  failed");
+    CleanupGlobalDiskDevice(dokanGlobal);
+    ExFreePool(DriverObject->FastIoDispatch);
     ExDeleteLookasideListEx(&g_DokanCCBLookasideList);
     return STATUS_INSUFFICIENT_RESOURCES;
   }
 
   if (!DokanLookasideCreate(&g_DokanEResourceLookasideList,
                             sizeof(ERESOURCE))) {
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(dokanGlobal->DeviceObject);
+    DDbgPrint("  DokanLookasideCreate g_DokanEResourceLookasideList  failed");
+    CleanupGlobalDiskDevice(dokanGlobal);
+    ExFreePool(DriverObject->FastIoDispatch);
     ExDeleteLookasideListEx(&g_DokanCCBLookasideList);
     ExDeleteLookasideListEx(&g_DokanFCBLookasideList);
     return STATUS_INSUFFICIENT_RESOURCES;
@@ -346,8 +395,6 @@ Return Value:
 {
 
   PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
-  WCHAR symbolicLinkBuf[] = DOKAN_GLOBAL_SYMBOLIC_LINK_NAME;
-  UNICODE_STRING symbolicLinkName;
   PDOKAN_GLOBAL dokanGlobal;
 
   DDbgPrint("==> DokanUnload\n");
@@ -357,17 +404,8 @@ Return Value:
   dokanGlobal = deviceObject->DeviceExtension;
   if (GetIdentifierType(dokanGlobal) == DGL) {
     DDbgPrint("  Delete Global DeviceObject\n");
-
-    KeSetEvent(&dokanGlobal->KillDeleteDeviceEvent, 0, FALSE);
-    RtlInitUnicodeString(&symbolicLinkName, symbolicLinkBuf);
-    IoDeleteSymbolicLink(&symbolicLinkName);
-
-    IoUnregisterFileSystem(dokanGlobal->FsDiskDeviceObject);
-    IoUnregisterFileSystem(dokanGlobal->FsCdDeviceObject);
-
-    IoDeleteDevice(dokanGlobal->FsDiskDeviceObject);
-    IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
-    IoDeleteDevice(deviceObject);
+    CleanupGlobalDiskDevice(dokanGlobal);
+    ExFreePool(DriverObject->FastIoDispatch);
   }
 
   ExDeleteNPagedLookasideList(&DokanIrpEntryLookasideList);
@@ -377,7 +415,6 @@ Return Value:
   ExDeleteLookasideListEx(&g_DokanEResourceLookasideList);
 
   DDbgPrint("<== DokanUnload\n");
-  return;
 }
 
 NTSTATUS
@@ -418,12 +455,123 @@ VOID DokanNoOpRelease(__in PVOID Fcb) {
   UNREFERENCED_PARAMETER(Fcb);
 
   DDbgPrint("<== DokanNoOpRelease\n");
-  return;
 }
 
 #define PrintStatus(val, flag)                                                 \
   if (val == flag)                                                             \
   DDbgPrint("  status = " #flag "\n")
+
+#define DOKAN_LOG_MAX_CHAR_COUNT 2048
+#define DOKAN_LOG_MAX_PACKET_BYTES \
+    (ERROR_LOG_MAXIMUM_SIZE - sizeof(IO_ERROR_LOG_PACKET))
+#define DOKAN_LOG_MAX_PACKET_NONNULL_CHARS \
+    (DOKAN_LOG_MAX_PACKET_BYTES / sizeof(WCHAR) - 1)
+
+VOID DokanPrintToSysLog(__in PDRIVER_OBJECT DriverObject,
+                        __in UCHAR MajorFunctionCode,
+                        __in NTSTATUS MessageId,
+                        __in NTSTATUS Status,
+                        __in LPCTSTR Format,
+                        __in va_list Args) {
+  NTSTATUS status = STATUS_SUCCESS;
+  PIO_ERROR_LOG_PACKET packet = NULL;
+  WCHAR* message = NULL;
+  size_t messageCapacity = DOKAN_LOG_MAX_CHAR_COUNT;
+  size_t messageCharCount = 0;
+  size_t messageCharsWritten = 0;
+  size_t packetCount = 0;
+  size_t i = 0;
+  UCHAR packetCharCount = 0;
+  UCHAR packetSize = 0;
+
+  __try {
+    message = ExAllocatePool(sizeof(WCHAR) * messageCapacity);
+    if (message == NULL) {
+      DDbgPrint("Failed to allocate message of capacity %d\n", messageCapacity);
+      __leave;
+    }
+
+    status = RtlStringCchVPrintfW(message, messageCapacity, Format, Args);
+    if (status == STATUS_BUFFER_OVERFLOW) {
+      // In this case we want to at least log what we can fit.
+      DDbgPrint("Log message was larger than DOKAN_LOG_MAX_CHAR_COUNT."
+                " Format: %S\n", Format);
+    } else if (status != STATUS_SUCCESS) {
+      DDbgPrint("Failed to generate log message with format: %S; status: %x\n",
+                Format, status);
+      __leave;
+    }
+
+    status = RtlStringCchLengthW(message, messageCapacity, &messageCharCount);
+    if (status != STATUS_SUCCESS) {
+      DDbgPrint("Failed to determine message length, status: %x\n", status);
+      __leave;
+    }
+
+    packetCount = messageCharCount / DOKAN_LOG_MAX_PACKET_NONNULL_CHARS;
+    if (messageCharCount % DOKAN_LOG_MAX_PACKET_NONNULL_CHARS != 0) {
+      ++packetCount;
+    }
+
+    for (i = 0; i < packetCount; i++) {
+      packetCharCount = min(messageCharCount - messageCharsWritten,
+                            DOKAN_LOG_MAX_PACKET_NONNULL_CHARS);
+      packetSize = sizeof(IO_ERROR_LOG_PACKET)
+          + sizeof(WCHAR) * (packetCharCount + 1);
+      packet = IoAllocateErrorLogEntry(DriverObject, packetSize);
+      if (packet == NULL) {
+        DDbgPrint("Failed to allocate packet of size %d\n", packetSize);
+        __leave;
+      }
+      RtlZeroMemory(packet, packetSize);
+      packet->MajorFunctionCode = MajorFunctionCode;
+      packet->NumberOfStrings = 1;
+      packet->StringOffset = &packet->DumpData[0] - packet;
+      packet->ErrorCode = MessageId;
+      packet->FinalStatus = Status;
+      RtlCopyMemory(&packet->DumpData[0], message + messageCharsWritten,
+                    sizeof(WCHAR) * packetCharCount);
+      IoWriteErrorLogEntry(packet);  // Destroys packet.
+      packet = NULL;
+      messageCharsWritten += packetCharCount;
+    }
+  }
+  __finally {
+    if (message != NULL) {
+      ExFreePool(message);
+    }
+  }
+}
+
+NTSTATUS DokanLogError(__in PDOKAN_LOGGER Logger,
+                       __in NTSTATUS Status,
+                       __in LPCTSTR Format,
+                       ...) {
+  va_list args;
+  va_start(args, Format);
+  DokanPrintToSysLog(Logger->DriverObject, Logger->MajorFunctionCode,
+                     GDFS_ERROR_MSG, Status, Format, args);
+  va_end(args);
+  return Status;
+}
+
+VOID DokanLogInfo(__in PDOKAN_LOGGER Logger, __in LPCTSTR Format, ...) {
+  va_list args;
+  va_start(args, Format);
+  DokanPrintToSysLog(Logger->DriverObject, Logger->MajorFunctionCode,
+                     GDFS_INFO_MSG, STATUS_SUCCESS, Format, args);
+  va_end(args);
+}
+
+VOID DokanCaptureBackTrace(__out PDokanBackTrace Trace) {
+  PVOID rawTrace[4];
+  USHORT count = RtlCaptureStackBackTrace(1, 4, rawTrace, NULL);
+  Trace->Address = (count > 0) ? rawTrace[0] : 0;
+  Trace->ReturnAddresses =
+        (((count > 1) ? ((ULONG_PTR)rawTrace[1] & 0xfffff) : 0) << 40)
+      | (((count > 2) ? ((ULONG_PTR)rawTrace[2] & 0xfffff) : 0) << 20)
+      |  ((count > 3) ? ((ULONG_PTR)rawTrace[3] & 0xfffff) : 0);
+}
 
 VOID DokanPrintNTStatus(NTSTATUS Status) {
   DDbgPrint("  status = 0x%x\n", Status);
@@ -482,12 +630,10 @@ VOID DokanNotifyReportChange0(__in PDokanFCB Fcb, __in PUNICODE_STRING FileName,
   ASSERT(Fcb != NULL);
   ASSERT(FileName != NULL);
 
-  // search the last "\"
   nameOffset = (USHORT)(FileName->Length / sizeof(WCHAR) - 1);
-  for (; FileName->Buffer[nameOffset] != L'\\'; --nameOffset)
-    ;
-  nameOffset++; // the next is the begining of filename
 
+  // search the last "\" and then calculate the Offset in bytes
+  nameOffset = (USHORT)(DokanSearchWcharinUnicodeStringWithUlong(FileName, L'\\', (ULONG)nameOffset, 1));
   nameOffset *= sizeof(WCHAR); // Offset is in bytes
 
   FsRtlNotifyFullReportChange(Fcb->Vcb->NotifySync, &Fcb->Vcb->DirNotifyList,
@@ -604,4 +750,157 @@ PointerAlignSize(ULONG sizeInBytes) {
   }
 
   return sizeInBytes;
+}
+
+#define DOKAN_RESOURCE_LOCK_DEBUG_INTERVAL_MSEC 10
+#define DOKAN_RESOURCE_LOCK_WARNING_MSEC 1000000  // 1 sec
+
+static const UNICODE_STRING noName = RTL_CONSTANT_STRING(L"<no name>");
+
+VOID DokanLockWarn(__in const ERESOURCE* Resource,
+                   __in const DokanResourceDebugInfo* DebugInfo,
+                   __in PDOKAN_LOGGER Logger,
+                   __in const char* Site,
+                   __in const UNICODE_STRING* ObjectName,
+                   __in const void* ObjectPointer) {
+  if (ObjectName == NULL || ObjectName->Length == 0) {
+    ObjectName = &noName;
+  }
+
+  if (DebugInfo->ExclusiveOwnerThread != NULL) {
+    DokanLogInfo(
+        Logger,
+        L"Stuck trying to lock %wZ (%I64x with ERESOURCE %I64x)"
+            L" in thread %I64x at %S."
+            L" Current exclusive owner is thread %I64x"
+            L" with outermost lock at %S.",
+        ObjectName,
+        ObjectPointer,
+        Resource,
+        KeGetCurrentThread(),
+        Site,
+        DebugInfo->ExclusiveOwnerThread,
+        DebugInfo->ExclusiveLockSite);
+    // This is like DDbgPrint but gets written "unconditionally" as long as you
+    // have the Debug Print Filter set up in the registry. Normal DDbgPrint
+    // calls are utterly stripped from release builds. We know that
+    // DokanLockWarn doesn't get invoked unless DriveFS is in lock debug mode,
+    // so this is OK.
+    DbgPrintEx(
+        DPFLTR_IHVDRIVER_ID,
+        DPFLTR_TRACE_LEVEL,
+        "Stuck trying to lock %wZ (%I64x with ERESOURCE %I64x)"
+            " in thread %I64x at %s."
+            " Current exclusive owner is thread %I64x"
+            " with outermost lock at %s.\n",
+        ObjectName,
+        ObjectPointer,
+        Resource,
+        KeGetCurrentThread(),
+        Site,
+        DebugInfo->ExclusiveOwnerThread,
+        DebugInfo->ExclusiveLockSite);
+  } else {
+    DokanLogInfo(
+        Logger,
+        L"Stuck trying to lock %wZ (%I64x with ERESOURCE %I64x)"
+            L" in thread %I64x at %S."
+            L" This resource has an unknown shared lock.",
+        ObjectName,
+        ObjectPointer,
+        Resource,
+        KeGetCurrentThread(),
+        Site);
+    DbgPrintEx(
+        DPFLTR_IHVDRIVER_ID,
+        DPFLTR_TRACE_LEVEL,
+        "Stuck trying to lock %wZ (%I64x with ERESOURCE %I64x)"
+            " in thread %I64x at %s."
+            " This resource has an unknown shared lock.\n",
+        ObjectName,
+        ObjectPointer,
+        Resource,
+        KeGetCurrentThread(),
+        Site);
+  }
+}
+
+VOID DokanLockNotifyResolved(__in const ERESOURCE* Resource,
+                             __in PDOKAN_LOGGER Logger) {
+  DokanLogInfo(Logger,
+      L"Blocking on ERESOURCE %I64x has resolved on thread %I64x",
+      Resource,
+      KeGetCurrentThread());
+  DbgPrintEx(
+      DPFLTR_IHVDRIVER_ID,
+      DPFLTR_TRACE_LEVEL,
+      "Blocking on ERESOURCE %I64x has resolved on thread %I64x",
+      Resource,
+      KeGetCurrentThread());
+}
+
+VOID DokanResourceLockWithDebugInfo(__in BOOLEAN Writable,
+                                    __in PERESOURCE Resource,
+                                    __in PDokanResourceDebugInfo DebugInfo,
+                                    __in PDOKAN_LOGGER Logger,
+                                    __in const char* Site,
+                                    __in const UNICODE_STRING* ObjectName,
+                                    __in const void* ObjectPointer) {
+  // The wait is in 100ns units. Negative means "from now" as opposed to an
+  // absolute wake up time.
+  LARGE_INTEGER wait = RtlConvertLongToLargeInteger(
+      -DOKAN_RESOURCE_LOCK_DEBUG_INTERVAL_MSEC * 10);
+  LARGE_INTEGER lastWarnTime = {0};
+  LARGE_INTEGER systemTime = {0};
+  BOOLEAN warned = FALSE;
+  BOOLEAN result = FALSE;
+  for (;;) {
+    KeEnterCriticalRegion();
+    if (Writable) {
+      result = ExAcquireResourceExclusiveLite(Resource, FALSE);
+    } else {
+      result = ExAcquireResourceSharedLite(Resource, FALSE);
+    }
+    if (result) {
+      break;
+    }
+    KeLeaveCriticalRegion();
+    KeQuerySystemTime(&systemTime);
+    if (lastWarnTime.QuadPart == 0) {
+      lastWarnTime = systemTime;
+    } else if ((systemTime.QuadPart - lastWarnTime.QuadPart) / 10
+               >= DOKAN_RESOURCE_LOCK_WARNING_MSEC) {
+      DokanLockWarn(Resource, DebugInfo, Logger, Site, ObjectName,
+                    ObjectPointer);
+      warned = TRUE;
+      lastWarnTime = systemTime;
+    }
+    KeDelayExecutionThread(KernelMode, TRUE, &wait);
+  }
+
+  if (ExIsResourceAcquiredExclusiveLite(Resource)) {
+    if (DebugInfo->ExclusiveLockCount == 0) {
+      DebugInfo->ExclusiveLockSite = Site;
+      DebugInfo->ExclusiveOwnerThread = KeGetCurrentThread();
+    }
+    // Note that we may need this increment even for a non-writable request,
+    // since any recursive acquire of an exclusive lock is exclusive.
+    ++DebugInfo->ExclusiveLockCount;
+  }
+  if (warned) {
+    DokanLockNotifyResolved(Resource, Logger);
+  }
+}
+
+VOID DokanResourceUnlockWithDebugInfo(
+    __in PERESOURCE Resource,
+    __in PDokanResourceDebugInfo DebugInfo) {
+  if (ExIsResourceAcquiredExclusiveLite(Resource)) {
+    if (--DebugInfo->ExclusiveLockCount == 0) {
+      DebugInfo->ExclusiveLockSite = NULL;
+      DebugInfo->ExclusiveOwnerThread = NULL;
+    }
+  }
+  ExReleaseResourceLite(Resource);
+  KeLeaveCriticalRegion();
 }

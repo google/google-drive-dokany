@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2017 - 2018 Google, Inc.
   Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -97,6 +97,9 @@ extern "C" {
 #define DOKAN_OPTION_CURRENT_SESSION 128
 /** Enable Lockfile/Unlockfile operations. Otherwise Dokan will take care of it */
 #define DOKAN_OPTION_FILELOCK_USER_MODE 256
+/** Enable logging of abnormally long kernel lock acquisition waits.
+    This is detrimental to performance and should not be enabled in normal use. */
+#define DOKAN_OPTION_LOCK_DEBUG_ENABLED 512
 
 /** @} */
 
@@ -127,6 +130,14 @@ typedef struct _DOKAN_OPTIONS {
   ULONG AllocationUnitSize;
   /** Sector Size of the volume. This will behave on the file size. */
   ULONG SectorSize;
+  /** Size in bytes of VolumeSecurityDescriptor, or 0 if not present. */
+  ULONG VolumeSecurityDescriptorLength;
+  /**
+   * A security descriptor controlling access to the volume itself, or NULL for
+   * default security. By default, all users can access and modify files, even
+   * if the GetFileSecurity callback indicates otherwise.
+   */
+  PSECURITY_DESCRIPTOR VolumeSecurityDescriptor;
 } DOKAN_OPTIONS, *PDOKAN_OPTIONS;
 
 /**
@@ -598,11 +609,15 @@ typedef struct _DOKAN_OPERATIONS {
   *
   * Is called when Dokan succeed to mount the volume.
   *
-  * \param DokanFileInfo Information about the file or directory.
+  * \param DeviceName The name of the mounted device. This name is unique for
+  * each mount request, and will match with the result of the QueryDosDevice.
+  * \param GlobalContext A pointer to the GlobalContext, which is given to
+  * Dokan through DOKAN_OPTIONS::Global_Context.
   * \return \c STATUS_SUCCESS on success or NTSTATUS appropriate to the request result.
   * \see Unmounted
   */
-  NTSTATUS(DOKAN_CALLBACK *Mounted)(PDOKAN_FILE_INFO DokanFileInfo);
+  NTSTATUS(DOKAN_CALLBACK *Mounted)(LPCWSTR DeviceName,
+                                    ULONG64 GlobalContext);
 
   /**
   * \brief Unmounted Dokan API callback

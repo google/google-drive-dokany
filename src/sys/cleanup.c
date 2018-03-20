@@ -50,6 +50,7 @@ Return Value:
   PDokanFCB fcb = NULL;
   PEVENT_CONTEXT eventContext;
   ULONG eventLength;
+  DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, IRP_MJ_CLEANUP);
 
   __try {
 
@@ -87,14 +88,27 @@ Return Value:
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
-    if (fileObject->SectionObjectPointer != NULL &&
-        fileObject->SectionObjectPointer->DataSectionObject != NULL) {
-      ExAcquireResourceExclusiveLite(&fcb->PagingIoResource, TRUE);
-      CcFlushCache(&fcb->SectionObjectPointers, NULL, 0, NULL);
-      CcPurgeCacheSection(&fcb->SectionObjectPointers, NULL, 0, FALSE);
-      CcUninitializeCacheMap(fileObject, NULL, NULL);
-      ExReleaseResourceLite(&fcb->PagingIoResource);
+    if (fcb->IsKeepalive) {
+      DokanFCBLockRW(fcb);
+      BOOLEAN keepaliveActive =
+          (fcb->FileCount == 1 && fcb->Vcb->IsKeepaliveActive);
+      fcb->Vcb->IsKeepaliveActive = FALSE;
+      DokanFCBUnlock(fcb);
+      if (keepaliveActive) {
+        if (IsUnmountPendingVcb(vcb)) {
+          DokanLogInfo(&logger,
+                       L"Ignoring keepalive close because unmount is already in"
+                       L" progress.");
+        } else {
+          DokanLogInfo(&logger, L"Unmounting due to keepalive close.");
+          DokanUnmount(vcb->Dcb);
+        }
+      }
+      status = STATUS_SUCCESS;
+      __leave;
     }
+
+    FlushFcb(fcb, fileObject);
 
     DokanFCBLockRW(fcb);
 

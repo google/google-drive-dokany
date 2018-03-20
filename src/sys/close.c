@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2015 - 2017 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -88,7 +88,7 @@ Return Value:
         DokanFreeCCB(ccb);
         DokanFCBUnlock(fcb);
 
-        DokanFreeFCB(fcb);
+        DokanFreeFCB(vcb, fcb);
 
         fileObject->FsContext2 = NULL;
       }
@@ -113,7 +113,7 @@ Return Value:
       DDbgPrint("   Free CCB:%p\n", ccb);
       DokanFreeCCB(ccb);
       DokanFCBUnlock(fcb);
-      DokanFreeFCB(fcb);
+      DokanFreeFCB(vcb, fcb);
       status = STATUS_SUCCESS;
       __leave;
     }
@@ -129,7 +129,7 @@ Return Value:
     DDbgPrint("   Free CCB:%p\n", ccb);
     DokanFreeCCB(ccb);
     DokanFCBUnlock(fcb);
-    DokanFreeFCB(fcb);
+    DokanFreeFCB(vcb, fcb);
 
     // Close can not be pending status
     // don't register this IRP

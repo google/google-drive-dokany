@@ -50,6 +50,8 @@ VOID PrintUnknownDeviceIoctlCode(__in ULONG IoctlCode) {
   case MOUNTMGRCONTROLTYPE:
     baseCodeStr = "MOUNTMGRCONTROLTYPE";
     break;
+  default:
+    break;
   }
   UNREFERENCED_PARAMETER(functionCode);
   DDbgPrint("   BaseCode: 0x%x(%s) FunctionCode 0x%x(%d)\n", baseCode,
@@ -218,6 +220,9 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     case IOCTL_DISK_GET_PARTITION_INFO_EX:
       DDbgPrint("  IOCTL_DISK_GET_PARTITION_INFO_EX\n");
       Irp->IoStatus.Information = sizeof(PARTITION_INFORMATION_EX);
+      break;
+    default:
+      DDbgPrint("  unknown ioctl %d\n", ioctl);
       break;
     }
 
@@ -420,7 +425,7 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     RtlZeroMemory(mountdevName, outputLength);
     mountdevName->NameLength = deviceName->Length;
 
-    if (sizeof(USHORT) + mountdevName->NameLength < outputLength) {
+    if (sizeof(USHORT) + mountdevName->NameLength <= outputLength) {
       RtlCopyMemory((PCHAR)mountdevName->Name, deviceName->Buffer,
                     mountdevName->NameLength);
       Irp->IoStatus.Information = sizeof(USHORT) + mountdevName->NameLength;
@@ -446,7 +451,7 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     uniqueId->UniqueIdLength = dcb->DiskDeviceName->Length;
 
-    if (sizeof(USHORT) + uniqueId->UniqueIdLength < outputLength) {
+    if (sizeof(USHORT) + uniqueId->UniqueIdLength <= outputLength) {
       RtlCopyMemory((PCHAR)uniqueId->UniqueId, dcb->DiskDeviceName->Buffer,
                     uniqueId->UniqueIdLength);
       Irp->IoStatus.Information =
@@ -478,7 +483,7 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
         linkName->UseOnlyIfThereAreNoOtherLinks = FALSE;
         linkName->NameLength = dcb->MountPoint->Length;
 
-        if (sizeof(USHORT) + linkName->NameLength < outputLength) {
+        if (sizeof(USHORT) + linkName->NameLength <= outputLength) {
           RtlCopyMemory((PCHAR)linkName->Name, dcb->MountPoint->Buffer,
                         linkName->NameLength);
           Irp->IoStatus.Information =
@@ -526,8 +531,16 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
           ExFreePool(dcb->MountPoint);
           dcb->MountPoint = NULL;
         }
-        if (dcb->MountPoint == NULL) {
-          DDbgPrint("   Not current MountPoint. MountDev set as MountPoint\n");
+
+        if (!dcb->MountPoint ||
+            ((dcb->MountPoint->Length != mountdevName->NameLength ||
+              RtlCompareMemory(mountdevName->Name, dcb->MountPoint->Buffer,
+                               mountdevName->NameLength) !=
+                  mountdevName->NameLength))) {
+
+          DDbgPrint("   Update mount Point by %ws\n", symbolicLinkNameBuf);
+          ExFreePool(dcb->MountPoint);
+
           dcb->MountPoint = DokanAllocateUnicodeString(symbolicLinkNameBuf);
           if (dcb->DiskDeviceName != NULL) {
             PMOUNT_ENTRY mountEntry;
@@ -557,8 +570,7 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
                 "   DiskDeviceName is null. Is device currently unmounted?\n");
           }
         } else {
-          DDbgPrint("   Mount Point already assigned to the device. New mount "
-                    "point ignored.\n");
+          DDbgPrint("   Mount Point match, no need to update it.\n");
         }
       } else {
         DDbgPrint("   Mount Point is not DosDevices, ignored.\n");
@@ -880,6 +892,13 @@ DiskDeviceControlWithLock(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   return status;
 }
 
+// Determines whether the given file object was obtained by opening the volume
+// itself as opposed to a specific file.
+BOOLEAN
+IsVolumeOpen(__in PDokanVCB Vcb, __in PFILE_OBJECT FileObject) {
+  return FileObject != NULL && FileObject->FsContext == &Vcb->VolumeFileHeader;
+}
+
 NTSTATUS
 DokanDispatchDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp)
 
@@ -919,9 +938,7 @@ Return Value:
 
     controlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
 
-    if (controlCode != IOCTL_EVENT_WAIT && controlCode != IOCTL_EVENT_INFO &&
-        controlCode != IOCTL_KEEPALIVE) {
-
+    if (controlCode != IOCTL_EVENT_WAIT && controlCode != IOCTL_EVENT_INFO) {
       DDbgPrint("==> DokanDispatchIoControl\n");
       DDbgPrint("  ProcessId %lu\n", IoGetRequestorProcessId(Irp));
     }
@@ -967,19 +984,6 @@ Return Value:
       status = DokanEventWrite(DeviceObject, Irp);
       break;
 
-    case IOCTL_KEEPALIVE:
-      DDbgPrint("  IOCTL_KEEPALIVE\n");
-      if (IsFlagOn(vcb->Flags, VCB_MOUNTED)) {
-        ExEnterCriticalRegionAndAcquireResourceExclusive(&dcb->Resource);
-        DokanUpdateTimeout(&dcb->TickCount, DOKAN_KEEPALIVE_TIMEOUT);
-        ExReleaseResourceAndLeaveCriticalRegion(&dcb->Resource);
-        status = STATUS_SUCCESS;
-      } else {
-        DDbgPrint(" device is not mounted\n");
-        status = STATUS_INSUFFICIENT_RESOURCES;
-      }
-      break;
-
     case IOCTL_RESET_TIMEOUT:
       status = DokanResetPendingIrpTimeout(DeviceObject, Irp);
       break;
@@ -989,6 +993,15 @@ Return Value:
       break;
 
     default: {
+      // Device control functions are only supposed to work on a volume handle.
+      // Some win32 functions, like GetVolumePathName, rely on these operations
+      // failing for file/directory handles. On the other hand, dokan issues its
+      // custom operations on non-volume handles, so we can't do this check at
+      // the top.
+      if (!IsVolumeOpen(vcb, irpSp->FileObject)) {
+        status = STATUS_INVALID_PARAMETER;
+        break;
+      }
       ULONG baseCode = DEVICE_TYPE_FROM_CTL_CODE(
           irpSp->Parameters.DeviceIoControl.IoControlCode);
       status = STATUS_NOT_IMPLEMENTED;
@@ -1019,8 +1032,7 @@ Return Value:
       DokanCompleteIrpRequest(Irp, status, Irp->IoStatus.Information);
     }
 
-    if (controlCode != IOCTL_EVENT_WAIT && controlCode != IOCTL_EVENT_INFO &&
-        controlCode != IOCTL_KEEPALIVE) {
+    if (controlCode != IOCTL_EVENT_WAIT && controlCode != IOCTL_EVENT_INFO) {
 
       DokanPrintNTStatus(status);
       DDbgPrint("<== DokanDispatchIoControl\n");

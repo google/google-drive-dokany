@@ -16,7 +16,7 @@ OptionDesc = %ServiceDescription%
 CopyFiles  = DokanFileSystem.DriverFiles
 
 [DefaultInstall.Services]
-AddService = %DriverName%,,DokanFileSystem.Service
+AddService = %DriverName%,,DokanFileSystem.Service,DokanFileSystem.EventLog
 
 [DefaultUninstall]
 DelFiles   = DokanFileSystem.DriverFiles
@@ -42,9 +42,16 @@ StartType      = 1 ;    SERVICE_SYSTEM_START
 ErrorControl   = 1 ;    SERVICE_ERROR_NORMAL
 LoadOrderGroup = "File System"
 
+[DokanFileSystem.EventLog]
+AddReg = DokanFileSystem.EventLog.Reg
+
+[DokanFileSystem.EventLog.Reg]
+HKR,,EventMessageFile,0x00020000,"%12%\%DriverName%.sys"
+HKR,,TypesSupported,0x00010001,7
+
 [Strings]
-ProviderName       = "Dokan"
+ProviderName       = "Google"
 DriverName         = "${DRIVER_NAME}"
 DriverVersion      = "${DRIVER_VERSION}"
-Disk1              = "Dokan installation media"
-ServiceDescription = "Dokan kernel-mode file system driver."
+Disk1              = "Google Drive installation media"
+ServiceDescription = "Google Drive kernel-mode file system driver."

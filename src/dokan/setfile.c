@@ -206,7 +206,7 @@ VOID DispatchSetInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   PEVENT_INFORMATION eventInfo;
   PDOKAN_OPEN_INFO openInfo;
   DOKAN_FILE_INFO fileInfo;
-  NTSTATUS status = STATUS_NOT_IMPLEMENTED;
+  NTSTATUS status = STATUS_INVALID_PARAMETER;
   ULONG sizeOfEventInfo = sizeof(EVENT_INFORMATION);
 
   if (EventContext->Operation.SetFile.FileInformationClass ==

@@ -1,7 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 - 2018 Google, Inc.
+  Copyright (C) 2015 - 2017 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -151,6 +152,11 @@ Return Value:
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
+    if (fcb->IsKeepalive) {
+      Irp->IoStatus.Information = 0;
+      status = STATUS_SUCCESS;
+      __leave;
+    }
     if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
       DDbgPrint("   DOKAN_FILE_DIRECTORY %p\n", fcb);
       status = STATUS_INVALID_PARAMETER;
@@ -170,11 +176,13 @@ Return Value:
 
     if (!isPagingIo && (fileObject->SectionObjectPointer != NULL) &&
         (fileObject->SectionObjectPointer->DataSectionObject != NULL)) {
-      ExAcquireResourceExclusiveLite(&fcb->PagingIoResource, TRUE);
+      DokanFCBLockRW(fcb);
+      DokanPagingIoLockRW(fcb);
       CcFlushCache(&fcb->SectionObjectPointers,
                    &irpSp->Parameters.Read.ByteOffset,
                    irpSp->Parameters.Read.Length, NULL);
-      ExReleaseResourceLite(&fcb->PagingIoResource);
+      DokanPagingIoUnlock(fcb);
+      DokanFCBUnlock(fcb);
     }
 
     DokanFCBLockRO(fcb);
@@ -327,6 +335,11 @@ VOID DokanCompleteRead(__in PIRP_ENTRY IrpEntry,
       DDbgPrint("  Updated CurrentByteOffset %I64d\n",
                 fileObject->CurrentByteOffset.QuadPart);
     }
+  }
+
+  if (IrpEntry->Flags & DOKAN_MDL_ALLOCATED) {
+	  DokanFreeMdl(irp);
+	  IrpEntry->Flags &= ~DOKAN_MDL_ALLOCATED;
   }
 
   if (NT_SUCCESS(status)) {

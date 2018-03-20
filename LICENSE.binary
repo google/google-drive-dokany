@@ -1,0 +1,5 @@
+With respect to binaries built using the Microsoft(R) Windows Driver
+Kit (WDK), LGPLv3 does not extend to any code contained in or derived
+from the WDK ("WDK Code"). As to WDK Code, by using or distributing
+such binaries you agree to be bound by the Microsoft Software License
+Terms for the WDK.

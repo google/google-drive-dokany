@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2017 - 2018 Google, Inc.
   Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -91,7 +91,6 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
   DokanCompleteIrpRequest(Irp, STATUS_CANCELLED, 0);
 
   DDbgPrint("<== DokanIrpCancelRoutine\n");
-  return;
 }
 
 VOID DokanOplockComplete(IN PVOID Context, IN PIRP Irp)
@@ -126,8 +125,6 @@ None.
   }
 
   DDbgPrint("<== DokanOplockComplete\n");
-
-  return;
 }
 
 VOID DokanPrePostIrp(IN PVOID Context, IN PIRP Irp)
@@ -473,8 +470,11 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   BOOLEAN useMountManager = FALSE;
   BOOLEAN mountGlobally = TRUE;
   BOOLEAN fileLockUserMode = FALSE;
+  BOOLEAN lockDebugEnabled = FALSE;
+  PSECURITY_DESCRIPTOR volumeSecurityDescriptor = NULL;
+  DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, 0);
 
-  DDbgPrint("==> DokanEventStart\n");
+  DokanLogInfo(&logger, L"Entered event start.");
 
   dokanGlobal = DeviceObject->DeviceExtension;
   if (GetIdentifierType(dokanGlobal) != DGL) {
@@ -492,11 +492,14 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   if (outBufferLen != sizeof(EVENT_DRIVER_INFO) ||
       inBufferLen != sizeof(EVENT_START) || eventStart == NULL ||
       baseGuidString == NULL) {
-    if (eventStart)
+    if (eventStart) {
       ExFreePool(eventStart);
-    if (baseGuidString)
+    }
+    if (baseGuidString) {
       ExFreePool(baseGuidString);
-    return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    return DokanLogError(&logger, STATUS_INSUFFICIENT_RESOURCES,
+                         L"Failed to allocate buffers in event start.");
   }
 
   RtlCopyMemory(eventStart, Irp->AssociatedIrp.SystemBuffer,
@@ -505,6 +508,7 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
 
   GUID dokanDriverVersion = DOKAN_DRIVER_VERSION;
   if (!IsEqualGUID(&eventStart->UserVersion, &dokanDriverVersion)) {
+    DokanLogInfo(&logger, L"Driver version check in event start failed.");
     driverInfo->DriverVersion = dokanDriverVersion;
     driverInfo->Status = DOKAN_START_FAILED;
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -552,6 +556,14 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     fileLockUserMode = TRUE;
   }
 
+  if (eventStart->Flags & DOKAN_EVENT_LOCK_DEBUG_ENABLED) {
+    DokanLogInfo(
+        &logger,
+        L"Enabling lock debugging. This should be disabled in normal use.");
+    DDbgPrint("  Lock debugging enabled\n");
+    lockDebugEnabled = TRUE;
+  }
+
   KeEnterCriticalRegion();
   ExAcquireResourceExclusiveLite(&dokanGlobal->Resource, TRUE);
 
@@ -571,7 +583,8 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   DDbgPrint("  Checking for MountPoint %ls \n", dokanControl.MountPoint);
   PMOUNT_ENTRY foundEntry = FindMountEntry(dokanGlobal, &dokanControl, FALSE);
   if (foundEntry != NULL) {
-    DDbgPrint("  MountPoint exists already %ls \n", dokanControl.MountPoint);
+    DokanLogInfo(&logger, L"Mount point exists already: %s",
+                 dokanControl.MountPoint);
     driverInfo->DriverVersion = dokanDriverVersion;
     driverInfo->Status = DOKAN_START_FAILED;
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -592,7 +605,7 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     KeLeaveCriticalRegion();
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
-    return status;
+    return DokanLogError(&logger, status, L"Failed to convert GUID to string.");
   }
   RtlZeroMemory(baseGuidString, 64 * sizeof(WCHAR));
   RtlStringCchCopyW(baseGuidString, 64,
@@ -601,22 +614,29 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
 
   InterlockedIncrement((LONG *)&dokanGlobal->MountId);
 
+  if (eventStart->VolumeSecurityDescriptorLength != 0) {
+    DDbgPrint("Using volume security descriptor of length %d\n",
+        eventStart->VolumeSecurityDescriptorLength);
+    deviceCharacteristics |= FILE_DEVICE_SECURE_OPEN;
+    volumeSecurityDescriptor = eventStart->VolumeSecurityDescriptor;
+  }
+
   status = DokanCreateDiskDevice(
       DeviceObject->DriverObject, dokanGlobal->MountId, eventStart->MountPoint,
-      eventStart->UNCName, baseGuidString, dokanGlobal, deviceType,
-      deviceCharacteristics, mountGlobally, useMountManager, &dcb);
+      eventStart->UNCName, volumeSecurityDescriptor, baseGuidString,
+      dokanGlobal, deviceType, deviceCharacteristics, mountGlobally,
+      useMountManager, &dcb);
 
   if (!NT_SUCCESS(status)) {
     ExReleaseResourceLite(&dokanGlobal->Resource);
     KeLeaveCriticalRegion();
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
-    return status;
+    return DokanLogError(&logger, status, L"Disk device creation failed.");
   }
 
   dcb->FileLockInUserMode = fileLockUserMode;
-
-  DDbgPrint("  MountId:%d\n", dcb->MountId);
+  dcb->LockDebugEnabled = lockDebugEnabled;
   driverInfo->DeviceNumber = dokanGlobal->MountId;
   driverInfo->MountId = dokanGlobal->MountId;
   driverInfo->Status = DOKAN_MOUNTED;
@@ -627,8 +647,9 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   // Finds the last '\' and copy into DeviceName.
   // DeviceName is \Volume{D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
   deviceNamePos = dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-  for (; dcb->SymbolicLinkName->Buffer[deviceNamePos] != L'\\'; --deviceNamePos)
-    ;
+  deviceNamePos = DokanSearchWcharinUnicodeStringWithUlong(
+      dcb->SymbolicLinkName, L'\\', deviceNamePos, 0);
+
   RtlStringCchCopyW(driverInfo->DeviceName,
                     sizeof(driverInfo->DeviceName) / sizeof(WCHAR),
                     &(dcb->SymbolicLinkName->Buffer[deviceNamePos]));
@@ -647,7 +668,8 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     dcb->IrpTimeout = eventStart->IrpTimeout;
   }
 
-  DDbgPrint("  DeviceName:%ws\n", driverInfo->DeviceName);
+  DokanLogInfo(&logger, L"Event start using mount ID: %d; device name: %s.",
+               dcb->MountId, driverInfo->DeviceName);
 
   dcb->UseAltStream = 0;
   if (eventStart->Flags & DOKAN_EVENT_ALTERNATIVE_STREAM_ON) {
@@ -668,7 +690,7 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   ExFreePool(eventStart);
   ExFreePool(baseGuidString);
 
-  DDbgPrint("<== DokanEventStart\n");
+  DokanLogInfo(&logger, L"Finished event start successfully.");
 
   return Irp->IoStatus.Status;
 }
@@ -784,5 +806,8 @@ DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
 
   KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
 
-  return STATUS_SUCCESS;
+  // if the corresponding IRP not found, the user should already canceled the operation and the IRP already destroyed.
+  DDbgPrint("  EventWrite : Cannot found corresponding IRP. User should already canceled the operation. Return STATUS_CANCELLED.");
+
+  return STATUS_CANCELLED;
 }

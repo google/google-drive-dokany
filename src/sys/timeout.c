@@ -1,7 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2015 - 2017 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -53,8 +54,8 @@ VOID DokanUnmount(__in PDokanDCB Dcb) {
   }
 
   deviceNamePos = Dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-  for (; Dcb->SymbolicLinkName->Buffer[deviceNamePos] != L'\\'; --deviceNamePos)
-    ;
+  deviceNamePos = DokanSearchWcharinUnicodeStringWithUlong(Dcb->SymbolicLinkName, L'\\', deviceNamePos, 0);
+
   RtlStringCchCopyW(eventContext->Operation.Unmount.DeviceName,
                     sizeof(eventContext->Operation.Unmount.DeviceName) /
                         sizeof(WCHAR),
@@ -82,39 +83,6 @@ VOID DokanUnmount(__in PDokanDCB Dcb) {
   DDbgPrint("<== DokanUnmount\n");
 }
 
-VOID DokanCheckKeepAlive(__in PDokanDCB Dcb) {
-  LARGE_INTEGER tickCount;
-  PDokanVCB vcb;
-
-  // DDbgPrint("==> DokanCheckKeepAlive\n");
-
-  KeEnterCriticalRegion();
-  KeQueryTickCount(&tickCount);
-  ExAcquireResourceSharedLite(&Dcb->Resource, TRUE);
-
-  if (Dcb->TickCount.QuadPart < tickCount.QuadPart) {
-
-    vcb = Dcb->Vcb;
-
-    ExReleaseResourceLite(&Dcb->Resource);
-
-    DDbgPrint("  Timeout, umount\n");
-
-    if (IsUnmountPendingVcb(vcb)) {
-      DDbgPrint("  Volume is not mounted\n");
-      KeLeaveCriticalRegion();
-      return;
-    }
-    DokanUnmount(Dcb);
-
-  } else {
-    ExReleaseResourceLite(&Dcb->Resource);
-  }
-
-  KeLeaveCriticalRegion();
-  // DDbgPrint("<== DokanCheckKeepAlive\n");
-}
-
 NTSTATUS
 ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   KIRQL oldIrql;
@@ -123,6 +91,9 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   LARGE_INTEGER tickCount;
   LIST_ENTRY completeList;
   PIRP irp;
+  BOOLEAN shouldUnmount = FALSE;
+  PDokanVCB vcb = Dcb->Vcb;
+  DOKAN_INIT_LOGGER(logger, Dcb->DeviceObject->DriverObject, 0);
 
   DDbgPrint("==> ReleaseTimeoutPendingIRP\n");
   InitializeListHead(&completeList);
@@ -185,6 +156,7 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   }
   KeReleaseSpinLock(&Dcb->PendingIrp.ListLock, oldIrql);
 
+  shouldUnmount = !vcb->IsKeepaliveActive && !IsListEmpty(&completeList);
   while (!IsListEmpty(&completeList)) {
     listHead = RemoveHeadList(&completeList);
     irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
@@ -194,6 +166,18 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   }
 
   DDbgPrint("<== ReleaseTimeoutPendingIRP\n");
+
+  if (shouldUnmount) {
+    // This avoids a race condition where the app terminates before activating
+    // the keepalive handle. In that case, we unmount the file system as soon
+    // as some specific operation gets timed out, which avoids repeated delays
+    // in Explorer.
+    DokanLogInfo(
+        &logger,
+        L"Unmounting due to operation timeout before keepalive handle was"
+        L" activated.");
+    DokanUnmount(Dcb);
+  }
   return STATUS_SUCCESS;
 }
 
@@ -262,6 +246,7 @@ Routine Description:
   BOOLEAN waitObj = TRUE;
   LARGE_INTEGER LastTime = {0};
   LARGE_INTEGER CurrentTime = {0};
+  DOKAN_INIT_LOGGER(logger, Dcb->DeviceObject->DriverObject, 0);
 
   DDbgPrint("==> DokanTimeoutThread\n");
 
@@ -291,11 +276,9 @@ Routine Description:
       KeQuerySystemTime(&CurrentTime);
       if ((CurrentTime.QuadPart - LastTime.QuadPart) >
           ((DOKAN_CHECK_INTERVAL + 2000) * 10000)) {
-        DDbgPrint("  System seems to be awaken from sleep mode. So do not "
-                  "Check Keep Alive yet.\n");
+        DokanLogInfo(&logger, L"Wake from sleep detected.");
       } else {
         ReleaseTimeoutPendingIrp(Dcb);
-        DokanCheckKeepAlive(Dcb);
       }
       KeQuerySystemTime(&LastTime);
     }
@@ -364,14 +347,6 @@ Routine Description:
   DDbgPrint("<== DokanStopCheckThread\n");
 }
 
-NTSTATUS
-DokanInformServiceAboutUnmount(__in PDEVICE_OBJECT DeviceObject,
-                               __in PIRP Irp) {
-  UNREFERENCED_PARAMETER(DeviceObject);
-  UNREFERENCED_PARAMETER(Irp);
-
-  return STATUS_SUCCESS;
-}
 
 VOID DokanUpdateTimeout(__out PLARGE_INTEGER TickCount, __in ULONG Timeout) {
   KeQueryTickCount(TickCount);
