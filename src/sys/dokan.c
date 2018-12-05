@@ -457,6 +457,23 @@ VOID DokanNoOpRelease(__in PVOID Fcb) {
   DDbgPrint("<== DokanNoOpRelease\n");
 }
 
+NTSTATUS DokanCheckOplock(
+    __in PDokanFCB Fcb,
+    __in PIRP Irp,
+    __in_opt PVOID Context,
+    __in_opt POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine,
+    __in_opt POPLOCK_FS_PREPOST_IRP PostIrpRoutine) {
+  ASSERT(Fcb->Vcb != NULL);
+  ASSERT(Fcb->Vcb->Dcb != NULL);
+  if (Fcb->Vcb != NULL && Fcb->Vcb->Dcb != NULL &&
+      Fcb->Vcb->Dcb->EnableOplocks) {
+    return FsRtlCheckOplock(DokanGetFcbOplock(Fcb), Irp, Context,
+                            CompletionRoutine, PostIrpRoutine);
+  }
+  return STATUS_SUCCESS;
+}
+
+
 #define PrintStatus(val, flag)                                                 \
   if (val == flag)                                                             \
   DDbgPrint("  status = " #flag "\n")
@@ -514,8 +531,8 @@ VOID DokanPrintToSysLog(__in PDRIVER_OBJECT DriverObject,
     }
 
     for (i = 0; i < packetCount; i++) {
-      packetCharCount = min(messageCharCount - messageCharsWritten,
-                            DOKAN_LOG_MAX_PACKET_NONNULL_CHARS);
+      packetCharCount = (UCHAR)min(messageCharCount - messageCharsWritten,
+                                   DOKAN_LOG_MAX_PACKET_NONNULL_CHARS);
       packetSize = sizeof(IO_ERROR_LOG_PACKET)
           + sizeof(WCHAR) * (packetCharCount + 1);
       packet = IoAllocateErrorLogEntry(DriverObject, packetSize);
@@ -526,7 +543,8 @@ VOID DokanPrintToSysLog(__in PDRIVER_OBJECT DriverObject,
       RtlZeroMemory(packet, packetSize);
       packet->MajorFunctionCode = MajorFunctionCode;
       packet->NumberOfStrings = 1;
-      packet->StringOffset = &packet->DumpData[0] - packet;
+      packet->StringOffset =
+          (USHORT)((char*)&packet->DumpData[0] - (char*)packet);
       packet->ErrorCode = MessageId;
       packet->FinalStatus = Status;
       RtlCopyMemory(&packet->DumpData[0], message + messageCharsWritten,
@@ -566,11 +584,11 @@ VOID DokanLogInfo(__in PDOKAN_LOGGER Logger, __in LPCTSTR Format, ...) {
 VOID DokanCaptureBackTrace(__out PDokanBackTrace Trace) {
   PVOID rawTrace[4];
   USHORT count = RtlCaptureStackBackTrace(1, 4, rawTrace, NULL);
-  Trace->Address = (count > 0) ? rawTrace[0] : 0;
+  Trace->Address = (ULONG64)((count > 0) ? rawTrace[0] : 0);
   Trace->ReturnAddresses =
-        (((count > 1) ? ((ULONG_PTR)rawTrace[1] & 0xfffff) : 0) << 40)
-      | (((count > 2) ? ((ULONG_PTR)rawTrace[2] & 0xfffff) : 0) << 20)
-      |  ((count > 3) ? ((ULONG_PTR)rawTrace[3] & 0xfffff) : 0);
+        (((count > 1) ? ((ULONG64)rawTrace[1] & 0xfffff) : 0) << 40)
+      | (((count > 2) ? ((ULONG64)rawTrace[2] & 0xfffff) : 0) << 20)
+      |  ((count > 3) ? ((ULONG64)rawTrace[3] & 0xfffff) : 0);
 }
 
 VOID DokanPrintNTStatus(NTSTATUS Status) {
@@ -903,4 +921,77 @@ VOID DokanResourceUnlockWithDebugInfo(
   }
   ExReleaseResourceLite(Resource);
   KeLeaveCriticalRegion();
+}
+
+BOOLEAN DokanVCBTryLockRW(PDokanVCB Vcb) {
+  KeEnterCriticalRegion();
+  BOOLEAN result = ExAcquireResourceExclusiveLite(&(Vcb)->Resource, FALSE);
+  if (!result) {
+    KeLeaveCriticalRegion();
+  }
+  return result;
+}
+
+ULONG GetOplockControlDebugInfoBit(ULONG FsControlCode) {
+  switch (FsControlCode) {
+    case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+      return 1;
+    case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+      return 2;
+    case FSCTL_REQUEST_BATCH_OPLOCK:
+      return 4;
+    case FSCTL_OPLOCK_BREAK_ACKNOWLEDGE:
+      return 8;
+    case FSCTL_OPBATCH_ACK_CLOSE_PENDING:
+      return 16;
+    case FSCTL_OPLOCK_BREAK_NOTIFY:
+      return 32;
+    case FSCTL_OPLOCK_BREAK_ACK_NO_2:
+      return 64;
+    case FSCTL_REQUEST_FILTER_OPLOCK:
+      return 128;
+    case FSCTL_REQUEST_OPLOCK:
+      return 256;
+    default:
+      return 65536;
+  }
+}
+
+void OplockDebugRecordMajorFunction(__in PDokanFCB Fcb, UCHAR MajorFunction) {
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.MajorFunctionMask,
+                (1 << MajorFunction));
+}
+
+void OplockDebugRecordFlag(__in PDokanFCB Fcb, ULONG Flag) {
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.Flags, Flag);
+}
+
+void OplockDebugRecordProcess(__in PDokanFCB Fcb) {
+  InterlockedOr64((PLONG64)&Fcb->OplockDebugInfo.OplockProcessMask,
+                  (LONG64)PsGetCurrentProcess());
+}
+
+void OplockDebugRecordRequest(__in PDokanFCB Fcb,
+                              __in ULONG FsControlMinorFunction,
+                              __in ULONG OplockLevel) {
+  OplockDebugRecordMajorFunction(Fcb, IRP_MJ_FILE_SYSTEM_CONTROL);
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.OplockFsctlMask,
+                GetOplockControlDebugInfoBit(FsControlMinorFunction));
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.OplockLevelMask, OplockLevel);
+  InterlockedIncrement(&Fcb->OplockDebugInfo.OplockFsctlCount);
+  OplockDebugRecordProcess(Fcb);
+}
+
+void OplockDebugRecordCreateRequest(__in PDokanFCB Fcb,
+                                    __in ACCESS_MASK AccessMask,
+                                    __in ULONG ShareAccess) {
+  OplockDebugRecordMajorFunction(Fcb, IRP_MJ_CREATE);
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.AccessMask, (LONG)AccessMask);
+  InterlockedOr((PLONG)&Fcb->OplockDebugInfo.ShareAccessMask,
+                (LONG)ShareAccess);
+}
+
+void OplockDebugRecordAtomicRequest(PDokanFCB Fcb) {
+  OplockDebugRecordProcess(Fcb);
+  InterlockedIncrement(&Fcb->OplockDebugInfo.AtomicRequestCount);
 }

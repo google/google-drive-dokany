@@ -199,19 +199,6 @@ typedef struct _IRP_LIST {
   KSPIN_LOCK ListLock;
 } IRP_LIST, *PIRP_LIST;
 
-typedef struct _DOKAN_CONTROL {
-  ULONG Type;            // File System Type
-  WCHAR MountPoint[260]; // Mount Point
-  WCHAR UNCName[64];
-  WCHAR DeviceName[64];        // Disk Device Name
-  PDEVICE_OBJECT DeviceObject; // Volume Device Object
-} DOKAN_CONTROL, *PDOKAN_CONTROL;
-
-typedef struct _MOUNT_ENTRY {
-  LIST_ENTRY ListEntry;
-  DOKAN_CONTROL MountControl;
-} MOUNT_ENTRY, *PMOUNT_ENTRY;
-
 typedef struct _DOKAN_GLOBAL {
   FSD_IDENTIFIER Identifier;
   ERESOURCE Resource;
@@ -293,6 +280,11 @@ typedef struct _DokanDiskControlBlock {
   IRP_LIST PendingIrp;
   IRP_LIST PendingEvent;
   IRP_LIST NotifyEvent;
+  // IRPs that need to be retried in kernel mode, e.g. due to oplock breaks
+  // asynchronously requested on an earlier try. These are IRPs that have never
+  // yet been dispatched to user mode. The IRPs are supposed to be added here at
+  // the time they become ready to retry.
+  IRP_LIST PendingRetryIrp;
 
   PUNICODE_STRING DiskDeviceName;
   PUNICODE_STRING SymbolicLinkName;
@@ -309,7 +301,7 @@ typedef struct _DokanDiskControlBlock {
 
   // When timeout is occuerd, KillEvent is triggered.
   KEVENT KillEvent;
-
+  KEVENT ForceTimeoutEvent;
   KEVENT ReleaseEvent;
 
   // the thread to deal with timeout
@@ -336,7 +328,53 @@ typedef struct _DokanDiskControlBlock {
   IO_REMOVE_LOCK RemoveLock;
   BOOLEAN LockDebugEnabled;
 
+  // Whether DOKAN_OPTION_RESOLVE_MOUNT_CONFLICTS was specified in the mount
+  // flags (see the comment for the flag). The logic to force unmounting of an
+  // existing dokan drive is in DokanEventStart. Other functions should treat
+  // this as meaning "let the mount manager resolve any remaining conflicts, and
+  // don't presume there aren't any."
+  BOOLEAN ResolveMountConflicts;
+  // If true, we know the requested mount point is occupied by a dokan drive we
+  // can't remove, so force the mount manager to auto-assign a different drive
+  // letter.
+  BOOLEAN ForceDriveLetterAutoAssignment;
+  // Whether the mount manager has notified us of the actual assigned mount
+  // point yet.
+  BOOLEAN MountPointDetermined;
+
+  // Whether any oplock functionality should be enabled.
+  BOOLEAN EnableOplocks;
+
+  // Whether to log oplock activity to the Event Log. This should only be
+  // enabled when diagnostic info is needed, since it may degrade performance.
+  BOOLEAN LogOplocks;
+
+  // Whether to satisfy a name query like "bar" under "\foo" by finding an open
+  // FCB with \foo\bar as a prefix and copying the "bar" part from that. On
+  // Windows 7, this can save a lot of time, because the fileinfo.sys filter
+  // driver typically does a path normalization within CreateFile operations.
+  // The Filter Manager on Windows 7 normalizes paths by searching each parent
+  // for the name of each child. On newer versions of Windows, it does a
+  // one-shot FileNormalizedNameInformation query against the target file, so
+  // this type of directory search is not common.
+  BOOLEAN OptimizeSingleNameSearch;
+
 } DokanDCB, *PDokanDCB;
+
+typedef struct _DOKAN_CONTROL {
+  ULONG Type;            // File System Type
+  WCHAR MountPoint[260]; // Mount Point
+  WCHAR UNCName[64];
+  WCHAR DeviceName[64];        // Disk Device Name
+  PDokanDCB Dcb;  // Always set on MOUNT_ENTRY
+  PDEVICE_OBJECT DiskDeviceObject;  // Always set on MOUNT_ENTRY
+  PDEVICE_OBJECT VolumeDeviceObject;  // NULL until fully mounted
+} DOKAN_CONTROL, *PDOKAN_CONTROL;
+
+typedef struct _MOUNT_ENTRY {
+  LIST_ENTRY ListEntry;
+  DOKAN_CONTROL MountControl;
+} MOUNT_ENTRY, *PMOUNT_ENTRY;
 
 #define IS_DEVICE_READ_ONLY(DeviceObject)                                      \
   (DeviceObject->Characteristics & FILE_READ_ONLY_DEVICE)
@@ -387,7 +425,7 @@ typedef struct _DokanVolumeControlBlock {
   // A mask that all Fcbs created for this volume match. We update this when we
   // deal each one out. In practice, they all tend to have the same first 40
   // bits on x64.
-  ULONG_PTR ValidFcbMask;
+  LONG64 ValidFcbMask;
 
   // Whether keep-alive has been activated on this volume.
   BOOLEAN IsKeepaliveActive;
@@ -400,6 +438,58 @@ typedef struct _DokanVolumeControlBlock {
 
 // Flags for device
 #define DCB_DELETE_PENDING 0x00000001
+
+
+// Captures information about how oplocks have been used with an FCB for the
+// whole lifetime of the FCB (and therefore the lifetime of the associated
+// OPLOCK struct).
+typedef struct _DokanOplockDebugInfo {
+  // All of the access masks for all IRP_MJ_CREATEs that have ever targeted this
+  // FCB, whether or not they were successful.
+  ULONG AccessMask;
+
+  // All of the share access flags from all IRP_MJ_CREATEs that have ever
+  // targeted this FCB, whether or not they were successful.
+  ULONG ShareAccessMask;
+
+  // All of the IRP major functions that have ever been used with this FCB. If
+  // a function has been used then 1 << MajorFunction is 1 in here.
+  ULONG MajorFunctionMask;
+
+  // All of the RequestedOplockLevel bits that have ever been used with this FCB
+  // ORed together.
+  ULONG OplockLevelMask;
+
+  // All of the oplock-related FSCTL minor functions values that have ever been
+  // used with this FCB. The functions have bits assigned by
+  // GetOplockControlDebugInfoBit.
+  ULONG OplockFsctlMask;
+
+  // Pointers to all EPROCESS objects that have ever made oplock-related
+  // requests (via an FSCTL or IRP_MJ_CREATE) on this FCB, ORed together.
+  ULONG64 OplockProcessMask;
+
+  // The number of FILE_OPEN_REQUIRING_OPLOCK opens that have occurred.
+  LONG AtomicRequestCount;
+
+  // The number of IRP_MJ_FILE_SYSTEM_CONTROL requests related to oplocks that
+  // have occurred.
+  LONG OplockFsctlCount;
+
+  // DOKAN_OPLOCK_DEBUG_* values indicating things that have ever happened in
+  // the lifetime of the FCB.
+  ULONG Flags;
+} DokanOplockDebugInfo, *PDokanOplockDebugInfo;
+
+// Flags indicating oplock-related events that have occurred on an FCB.
+#define DOKAN_OPLOCK_DEBUG_ATOMIC_BACKOUT 1
+#define DOKAN_OPLOCK_DEBUG_COMPLETE_IF_OPLOCKED 2
+#define DOKAN_OPLOCK_DEBUG_EXPLICIT_BREAK_IN_CREATE 4
+#define DOKAN_OPLOCK_DEBUG_GENERIC_ACKNOWLEDGEMENT 8
+#define DOKAN_OPLOCK_DEBUG_CANCELED_CREATE 16
+#define DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE 32
+#define DOKAN_OPLOCK_DEBUG_CREATE_RETRY_QUEUED 64
+#define DOKAN_OPLOCK_DEBUG_CREATE_RETRIED 128
 
 typedef struct _DokanFileControlBlock {
   // Locking: Identifier is read-only, no locks needed.
@@ -463,10 +553,21 @@ typedef struct _DokanFileControlBlock {
   // turns the CreateFile into a CreateFile + CloseHandle + CreateFile sequence,
   // the hidden CloseHandle call doesn't trigger unmounting.
 
-  // TRUE if this FCB points to the keep-alive file name. This prevents the FCB
-  // from dispatching normally to user mode, but the IsKeepaliveActive flag must
-  // also be true in order for auto-unmounting to happen.
+  // TRUE if this FCB points to the keep-alive file name. This allows keepalive
+  // activation to happen on a particular CCB, which sets IsKeepaliveActive on
+  // that CCB and triggers unmount-on-cleanup behavior.
   BOOLEAN IsKeepalive;
+
+  // If true, never dispatch requests to user mode for this handle. This is set
+  // for keepalive and notification handles that are typically held by the
+  // user mode process to which the file system sends requests. That process
+  // must avoid having automatic IRP_MJ_CLEANUPs from its termination handle
+  // sweep get dispatched back to itself, since its normal threads will all be
+  // gone at that point.
+  BOOLEAN BlockUserModeDispatch;
+
+  // Info that is useful for troubleshooting oplock problems in a debugger.
+  DokanOplockDebugInfo OplockDebugInfo;
 
 } DokanFCB, *PDokanFCB;
 
@@ -574,6 +675,10 @@ VOID DokanResourceUnlockWithDebugInfo(__in PERESOURCE Resource,
       DokanResourceUnlock(&(fcb)->PagingIoResource);             \
     }
 
+// Locks the given VCB for read-write and returns TRUE, if it is not already
+// locked at all by another thread; otherwise returns FALSE.
+BOOLEAN DokanVCBTryLockRW(PDokanVCB vcb);
+
 #define DokanVCBLockRW(vcb)                                      \
     if ((vcb)->Dcb->LockDebugEnabled) {                          \
       DokanResourceLockWithDebugInfo(                            \
@@ -632,6 +737,16 @@ typedef struct _DokanContextControlBlock {
 
   // Locking: Read only field. No locking needed.
   ULONG MountId;
+
+  // Whether keep-alive has been activated on this FCB.
+  BOOLEAN IsKeepaliveActive;
+
+  // Whether this CCB has a pending IRP_MJ_CREATE with
+  // FILE_OPEN_REQUIRING_OPLOCK, which has gotten past the request for the
+  // oplock in DokanDispatchCreate. If so, the request needs to be backed out if
+  // the IRP_MJ_CREATE does not succeed. The flag is cleared when the oplock
+  // request is backed out.
+  BOOLEAN AtomicOplockRequestPending;
 } DokanCCB, *PDokanCCB;
 
 //
@@ -645,6 +760,15 @@ typedef struct _DokanContextControlBlock {
 #define DokanGetFcbOplock(F) &(F)->Oplock
 #endif
 
+// Calls FsRtlCheckOplock if oplocks are enabled for the volume associated with
+// the given FCB. Otherwise, returns STATUS_SUCCESS.
+NTSTATUS DokanCheckOplock(
+    __in PDokanFCB Fcb,
+    __in PIRP Irp,
+    __in_opt PVOID Context,
+    __in_opt POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine,
+    __in_opt POPLOCK_FS_PREPOST_IRP PostIrpRoutine);
+
 // IRP list which has pending status
 // this structure is also used to store event notification IRP
 typedef struct _IRP_ENTRY {
@@ -654,6 +778,7 @@ typedef struct _IRP_ENTRY {
   PIO_STACK_LOCATION IrpSp;
   PFILE_OBJECT FileObject;
   BOOLEAN CancelRoutineFreeMemory;
+  NTSTATUS AsyncStatus;
   ULONG Flags;
   LARGE_INTEGER TickCount;
   PIRP_LIST IrpList;
@@ -757,6 +882,8 @@ DRIVER_CANCEL DokanEventCancelRoutine;
 
 DRIVER_CANCEL DokanIrpCancelRoutine;
 
+DRIVER_CANCEL DokanCreateIrpCancelRoutine;
+
 VOID DokanOplockComplete(IN PVOID Context, IN PIRP Irp);
 
 VOID DokanPrePostIrp(IN PVOID Context, IN PIRP Irp);
@@ -812,6 +939,14 @@ NTSTATUS
 DokanRegisterPendingIrp(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp,
                         __in PEVENT_CONTEXT EventContext, __in ULONG Flags);
 
+VOID
+DokanRegisterPendingRetryIrp(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp);
+
+VOID
+DokanRegisterAsyncCreateFailure(__in PDEVICE_OBJECT DeviceObject,
+                                __in PIRP Irp,
+                                __in NTSTATUS Status);
+
 VOID DokanEventNotification(__in PIRP_LIST NotifyEvent,
                             __in PEVENT_CONTEXT EventContext);
 
@@ -829,6 +964,13 @@ VOID DokanCompleteQueryInformation(__in PIRP_ENTRY IrpEntry,
 
 VOID DokanCompleteSetInformation(__in PIRP_ENTRY IrpEntry,
                                  __in PEVENT_INFORMATION EventInfo);
+
+// Invokes DokanCompleteCreate safely to time out an IRP_MJ_CREATE from a thread
+// that is not already in the context of a file system request.
+VOID
+DokanCancelCreateIrp(__in PDEVICE_OBJECT DeviceObject,
+                     __in PIRP_ENTRY IrpEntry,
+                     __in NTSTATUS Status);
 
 VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
                          __in PEVENT_INFORMATION EventInfo);
@@ -869,7 +1011,7 @@ DokanCreateDiskDevice(__in PDRIVER_OBJECT DriverObject, __in ULONG MountId,
                       __in DEVICE_TYPE DeviceType,
                       __in ULONG DeviceCharacteristics,
                       __in BOOLEAN MountGlobally, __in BOOLEAN UseMountManager,
-                      __out PDokanDCB *Dcb);
+                      __out PDOKAN_CONTROL DokanControl);
 
 VOID DokanInitVpb(__in PVPB Vpb, __in PDEVICE_OBJECT VolumeDevice);
 VOID DokanDeleteDeviceObject(__in PDokanDCB Dcb);
@@ -892,6 +1034,10 @@ VOID DokanNotifyReportChange(__in PDokanFCB Fcb, __in ULONG FilterMatch,
 
 PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
                            __in ULONG FileNameLength);
+
+// Backs out an atomic oplock request that was made in DokanDispatchCreate. This
+// should be called if the IRP for which the request was made is about to fail.
+VOID DokanMaybeBackOutAtomicOplockRequest(__in PDokanCCB Ccb, __in PIRP Irp);
 
 NTSTATUS
 DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb);
@@ -927,6 +1073,10 @@ BOOLEAN IsMounted(__in PDEVICE_OBJECT DeviceObject);
 BOOLEAN IsDeletePending(__in PDEVICE_OBJECT DeviceObject);
 
 BOOLEAN IsUnmountPendingVcb(__in PDokanVCB vcb);
+
+PMOUNT_ENTRY
+InsertMountEntry(PDOKAN_GLOBAL dokanGlobal, PDOKAN_CONTROL DokanControl,
+                 BOOLEAN lockGlobal);
 
 PMOUNT_ENTRY
 FindMountEntry(__in PDOKAN_GLOBAL dokanGlobal, __in PDOKAN_CONTROL DokanControl,
@@ -983,5 +1133,37 @@ __inline VOID DokanClearFlag(PULONG Flags, ULONG FlagBit) {
 
 ULONG DokanSearchWcharinUnicodeStringWithUlong(__in PUNICODE_STRING inputPUnicodeString, __in WCHAR targetWchar,
 	__in ULONG offsetPosition, __in int isIgnoreTargetWchar);
+
+// Logs the occurrence of the given type of IRP in the oplock debug info of the
+// FCB.
+void OplockDebugRecordMajorFunction(__in PDokanFCB Fcb,
+                                    __in UCHAR MajorFunction);
+
+// Logs the occurrence of an event type indicated by the DOKAN_OPLOCK_DEBUG_*
+// constants. The Flag value should be one constant.
+void OplockDebugRecordFlag(__in PDokanFCB Fcb, __in ULONG Flag);
+
+// Logs the process doing an oplock-related operation in the oplock debug info
+// of the FCB. This is not needed for explicit oplock requests. Use it e.g. for
+// an IRP_MJ_CREATE that requests an atomic oplock.
+void OplockDebugRecordProcess(__in PDokanFCB Fcb);
+
+// Records debug info about an oplock-related IRP_MJ_FILE_SYSTEM_CONTROL in the
+// oplock debug info of the FCB. The OplockLevel is a valid combination of
+// Windows OPLOCK_LEVEL_CACHE_* flags indicating the kind of oplock requested,
+// if applicable.
+void OplockDebugRecordRequest(__in PDokanFCB Fcb,
+                              __in ULONG FsControlMinorFunction,
+                              __in ULONG OplockLevel);
+
+// Logs the occurrence of an IRP_MJ_CREATE request with the specified access
+// flags in the oplock debug info of the FCB. Further information, like the
+// presence of an atomic oplock request, should be logged separately.
+void OplockDebugRecordCreateRequest(__in PDokanFCB Fcb,
+                                    __in ACCESS_MASK AccessMask,
+                                    __in ULONG ShareAccess);
+
+// Logs an atomic oplock request within a create operation.
+void OplockDebugRecordAtomicRequest(__in PDokanFCB Fcb);
 
 #endif // DOKAN_H_

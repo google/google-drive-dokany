@@ -80,6 +80,7 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_WRITE);
     if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
       status = STATUS_INVALID_PARAMETER;
       __leave;
@@ -234,8 +235,8 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       //
       // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
       if (!FlagOn(Irp->Flags, IRP_PAGING_IO)) {
-        status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), Irp, eventContext,
-                                  DokanOplockComplete, DokanPrePostIrp);
+        status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
+                                  DokanPrePostIrp);
 
         //
         //  if FsRtlCheckOplock returns STATUS_PENDING the IRP has been posted

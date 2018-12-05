@@ -70,6 +70,15 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define FSCTL_ACTIVATE_KEEPALIVE                                               \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+// DeviceIoControl code to send path notification request.
+#define FSCTL_NOTIFY_PATH \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80F, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// DeviceIoControl code to retrieve VOLUME_LABEL into a null-terminated WCHAR
+// buffer.
+#define FSCTL_VOLUME_LABEL                                                     \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 #define DRIVER_FUNC_INSTALL 0x01
 #define DRIVER_FUNC_REMOVE 0x02
 
@@ -93,12 +102,14 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define DOKAN_SYNCHRONOUS_IO 64
 #define DOKAN_WRITE_TO_END_OF_FILE 128
 #define DOKAN_NOCACHE 256
+#define DOKAN_RETRY_CREATE 512
 
 // used in DOKAN_START->DeviceType
 #define DOKAN_DISK_FILE_SYSTEM 0
 #define DOKAN_NETWORK_FILE_SYSTEM 1
 
 #define DOKAN_KEEPALIVE_FILE_NAME L"\\__drive_fs_keepalive"
+#define DOKAN_NOTIFICATION_FILE_NAME  L"\\drive_fs_notification"
 
 /*
  * This structure is used for copying UNICODE_STRING from the kernel mode driver
@@ -110,6 +121,20 @@ typedef struct _DOKAN_UNICODE_STRING_INTERMEDIATE {
   USHORT MaximumLength;
   WCHAR Buffer[1];
 } DOKAN_UNICODE_STRING_INTERMEDIATE, *PDOKAN_UNICODE_STRING_INTERMEDIATE;
+
+/*
+ * This structure is used for sending notify path information from the user mode
+ * driver to the kernel mode driver. See below links for parameter details for
+ * CompletionFilter and Action, and FsRtlNotifyFullReportChange call.
+ * https://msdn.microsoft.com/en-us/library/windows/hardware/ff547026(v=vs.85).aspx
+ * https://msdn.microsoft.com/en-us/library/windows/hardware/ff547041(v=vs.85).aspx
+ */
+typedef struct _DOKAN_NOTIFY_PATH_INTERMEDIATE {
+  ULONG CompletionFilter;
+  ULONG Action;
+  USHORT Length;
+  WCHAR Buffer[1];
+} DOKAN_NOTIFY_PATH_INTERMEDIATE, *PDOKAN_NOTIFY_PATH_INTERMEDIATE;
 
 /*
  * This structure is used for copying ACCESS_STATE from the kernel mode driver
@@ -346,17 +371,52 @@ typedef struct _EVENT_INFORMATION {
 #define DOKAN_EVENT_CURRENT_SESSION 16
 #define DOKAN_EVENT_FILELOCK_USER_MODE 32
 #define DOKAN_EVENT_LOCK_DEBUG_ENABLED 64
+#define DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS 128
+#define DOKAN_EVENT_ENABLE_OPLOCKS 256
+#define DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH 512
+#define DOKAN_EVENT_DRIVE_LETTER_IN_USE 1024
+#define DOKAN_EVENT_LOG_OPLOCKS 2048
+
+// Non-exclusive bits that can be set in EVENT_DRIVER_INFO.Flags for the driver
+// to send back extra info about what happened during a mount attempt, whether
+// or not it succeeded.
+
+// The volume arrival notification did not trigger mounting as expected, so an
+// explicit request was made to the mount manager.
+#define DOKAN_DRIVER_INFO_MOUNT_FORCED 1
+
+// Dokan did not specify a preferred drive letter in response to the suggested
+// link name query from the mount manager. This happens if we know the preferred
+// drive letter is in use, and want the mount manager to select one.
+#define DOKAN_DRIVER_INFO_AUTO_ASSIGN_REQUESTED 2
+
+// Dokan unmounted and then reused the preferred drive letter, because it was
+// determined to be another dokan drive owned by the same Windows user.
+#define DOKAN_DRIVER_INFO_OLD_DRIVE_UNMOUNTED 4
+
+// Dokan determined that the preferred drive letter was in use by a dokan drive
+// owned by a different Windows user. If this is set, then
+// DOKAN_DRIVER_INFO_AUTO_ASSIGNED is also set.
+#define DOKAN_DRIVER_INFO_OLD_DRIVE_LEFT_MOUNTED 8
+
+// The dokan driver is returning a mount response to the DLL before the mount
+// manager has actually assigned a drive letter. We are not sure if this ever
+// happens; if so, it should be very rare.
+#define DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED 16
 
 typedef struct _EVENT_DRIVER_INFO {
   GUID DriverVersion;
   ULONG Status;
+  ULONG Flags;
   ULONG DeviceNumber;
   ULONG MountId;
   WCHAR DeviceName[64];
+  WCHAR ActualDriveLetter;
 } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
 
 typedef struct _EVENT_START {
   GUID UserVersion;
+  GUID BaseVolumeGuid;
   ULONG DeviceType;
   ULONG Flags;
   WCHAR MountPoint[260];

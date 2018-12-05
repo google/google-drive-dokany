@@ -100,7 +100,29 @@ extern "C" {
 /** Enable logging of abnormally long kernel lock acquisition waits.
     This is detrimental to performance and should not be enabled in normal use. */
 #define DOKAN_OPTION_LOCK_DEBUG_ENABLED 512
-
+/** Accept a requested drive letter mount point that may be occupied, and
+    reasonably resolve conflicts by unmounting the existing dokan drive or
+    assigning a usable drive letter. Without this flag, the caller must validate
+    the availability of the requested mount point, or errors and/or weird things
+    happen. */
+#define DOKAN_OPTION_RESOLVE_MOUNT_CONFLICTS 1024
+/** Whether DokanNotifyXXX functions should be enabled, which requires this
+    library to maintain a special handle while the file system is mounted.
+    Without this flag, the functions always return FALSE if invoked. */
+#define DOKAN_OPTION_ENABLE_NOTIFICATION_API 2048
+/** Whether to enable any oplock support on the volume. Historically it was
+    always enabled before this flag was added. Regular range locks are enabled
+    regardless. */
+#define DOKAN_OPTION_ENABLE_OPLOCKS 4096
+/** Whether to satisfy a single-entry, name-only directory search without
+    dispatching to the FindFiles callback, if there is an open file from which
+    the driver can just copy the normalized name. These searches are frequently
+    done inside of CreateFile calls on Windows 7.
+*/
+#define DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH 8192
+/** Whether to log oplock activity to the event log. This should only be enabled
+    when diagnostic info is needed, since it may degrade performance. */
+#define DOKAN_OPTION_LOG_OPLOCKS 16384
 /** @} */
 
 /**
@@ -611,12 +633,17 @@ typedef struct _DOKAN_OPERATIONS {
   *
   * \param DeviceName The name of the mounted device. This name is unique for
   * each mount request, and will match with the result of the QueryDosDevice.
+  * \param MountPoint The actual mount point, if
+  * DOKAN_OPTION_RESOLVE_MOUNT_CONFLICTS is used. Otherwise, it is the requested
+  * mount point.
   * \param GlobalContext A pointer to the GlobalContext, which is given to
   * Dokan through DOKAN_OPTIONS::Global_Context.
-  * \return \c STATUS_SUCCESS on success or NTSTATUS appropriate to the request result.
+  * \return \c STATUS_SUCCESS on success or NTSTATUS appropriate to the request
+  * result.
   * \see Unmounted
   */
   NTSTATUS(DOKAN_CALLBACK *Mounted)(LPCWSTR DeviceName,
+                                    LPCWSTR MountPoint,
                                     ULONG64 GlobalContext);
 
   /**
@@ -868,6 +895,59 @@ BOOL DOKANAPI DokanGetMountPointList(PDOKAN_CONTROL list, ULONG length,
 void DOKANAPI DokanMapKernelToUserCreateFileFlags(
     ULONG FileAttributes, ULONG CreateOptions, ULONG CreateDisposition,
     DWORD *outFileAttributesAndFlags, DWORD *outCreationDisposition);
+
+/**
+ * Note that all of the file paths passed in to the Notify methods below must
+ * include the drive letter, for example "G:<path>".
+ */
+/**
+ * \brief Notify dokan that a file or a directory has been created.
+ *
+ * \param FilePath Full path to the file or directory, including mount point.
+ * \param IsDirectory Indicates if the path is a directory.
+ * \return TRUE if notification succeeded.
+ */
+BOOL DOKANAPI DokanNotifyCreate(LPCWSTR FilePath, BOOL IsDirectory);
+
+/**
+ * \brief Notify dokan that a file or a directory has been deleted.
+ *
+ * \param FilePath Full path to the file or directory, including mount point.
+ * \param IsDirectory Indicates if the path is a directory.
+ * \return TRUE if notification succeeded.
+ */
+BOOL DOKANAPI DokanNotifyDelete(LPCWSTR FilePath, BOOL IsDirectory);
+
+/**
+ * \brief Notify dokan that file or directory attributes have changed.
+ *
+ * \param FilePath Full path to the file or directory, including mount point.
+ * \return TRUE if notification succeeded.
+ */
+BOOL DOKANAPI DokanNotifyUpdate(LPCWSTR FilePath);
+
+/**
+ * \brief Notify dokan that file or directory extended attributes have changed.
+ *
+ * \param FilePath Full path to the file or directory, including mount point.
+ * \return TRUE if notification succeeded.
+ */
+BOOL DOKANAPI DokanNotifyXAttrUpdate(LPCWSTR FilePath);
+
+/**
+ * \brief Notify dokan that a file or a directory has been renamed. This method
+ *  supports in-place rename for file/directory within the same parent.
+ *
+ * \param OldPath Old path to the file or directory, including mount point.
+ * \param NewPath New path to the file or directory, including mount point.
+ * \param IsDirectory Indicates if the path is a directory.
+ * \param IsInSameFolder Indicates if the file or directory have same parent.
+ * \return TRUE if notification succeeded.
+ */
+BOOL DOKANAPI DokanNotifyRename(LPCWSTR OldPath,
+                                LPCWSTR NewPath,
+                                BOOL IsDirectory,
+                                BOOL IsInSameDirectory);
 
 /**
 * \brief Convert IRP_MJ_CREATE DesiredAccess to generic rights.

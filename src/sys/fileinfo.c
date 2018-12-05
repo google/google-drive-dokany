@@ -74,8 +74,9 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
-    DokanFCBLockRO(fcb);
 
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_QUERY_INFORMATION);    
+    DokanFCBLockRO(fcb);
     switch (irpSp->Parameters.QueryFile.FileInformationClass) {
     case FileBasicInformation:
       DDbgPrint("  FileBasicInformation\n");
@@ -142,7 +143,7 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       }
 
       if (irpSp->Parameters.QueryFile.Length <
-          FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + length) {
+          (ULONG)FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + length) {
         status = STATUS_BUFFER_OVERFLOW;
       } else {
         RtlCopyMemory(&nameInfo->FileName[0], fileName->Buffer,
@@ -208,6 +209,11 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       break;
     }
 
+    if (fcb != NULL && fcb->BlockUserModeDispatch) {
+      status = STATUS_SUCCESS;
+      __leave;
+    }
+
     // if it is not treadted in swich case
 
     // calculate the length of EVENT_CONTEXT
@@ -218,11 +224,6 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     if (eventContext == NULL) {
       status = STATUS_INSUFFICIENT_RESOURCES;
-      __leave;
-    }
-
-    if (fcb != NULL && fcb->IsKeepalive) {
-      status = STATUS_SUCCESS;
       __leave;
     }
 
@@ -472,7 +473,7 @@ DokanDispatchSetInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
-
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_SET_INFORMATION);
     switch (irpSp->Parameters.SetFile.FileInformationClass) {
     case FileAllocationInformation:
       DDbgPrint(
@@ -666,9 +667,8 @@ DokanDispatchSetInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
                   fcb->FileName.Buffer, fcb->FileName.Length);
 
     // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
-    status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), Irp, eventContext,
-                              DokanOplockComplete, DokanPrePostIrp);
-
+    status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
+                              DokanPrePostIrp);
     //
     //  if FsRtlCheckOplock returns STATUS_PENDING the IRP has been posted
     //  to service an oplock break and we need to leave now.
@@ -695,6 +695,49 @@ DokanDispatchSetInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   }
 
   return status;
+}
+
+// Returns the last index, |i|, so that [0, i] represents the range of the path
+// to the parent directory. For example, if |fileName| is |C:\temp\text.txt|,
+// returns 7 (the index of |\| right before |text.txt|).
+//
+// Returns -1 if no '\\' is found,
+LONG GetParentDirectoryEndingIndex(PUNICODE_STRING fileName) {
+  if (fileName->Length == 0) {
+    return -1;
+  }
+  // If the path ends with L'\\' (in which case, this is a directory, that last
+  // '\\' character can be ignored.)
+  USHORT lastIndex = fileName->Length / sizeof(WCHAR) - 1;
+  if (fileName->Buffer[lastIndex] == L'\\') {
+    lastIndex--;
+  }
+  for (LONG index = lastIndex; index >= 0; index--) {
+    if (fileName->Buffer[index] == L'\\') {
+      return index;
+    }
+  }
+  // There is no '\\' found.
+  return -1;
+}
+
+// Returns |TRUE| if |fileName1| and |fileName2| represent paths to two
+// files/folders that are in the same directory.
+BOOLEAN IsInSameDirectory(PUNICODE_STRING fileName1,
+                          PUNICODE_STRING fileName2) {
+  LONG parentEndingIndex = GetParentDirectoryEndingIndex(fileName1);
+  if (parentEndingIndex != GetParentDirectoryEndingIndex(fileName2)) {
+    return FALSE;
+  }
+  for (LONG i = 0; i < parentEndingIndex; i++) {
+    // TODO(ttdinhtrong): This code assumes case sensitive, which is not always
+    // true. As of now we do not know if the user is in case sensitive or case
+    // insensitive mode.
+    if (fileName1->Buffer[i] != fileName2->Buffer[i]) {
+      return FALSE;
+    }
+  }
+  return TRUE;
 }
 
 VOID DokanCompleteSetInformation(__in PIRP_ENTRY IrpEntry,
@@ -846,20 +889,31 @@ VOID DokanCompleteSetInformation(__in PIRP_ENTRY IrpEntry,
       case FileRenameInformation: {
         DDbgPrint("  DokanCompleteSetInformation Report FileRenameInformation");
 
-        DokanNotifyReportChange0(fcb, &oldFileName,
-                                 DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
-                                     ? FILE_NOTIFY_CHANGE_DIR_NAME
-                                     : FILE_NOTIFY_CHANGE_FILE_NAME,
-                                 FILE_ACTION_RENAMED_OLD_NAME);
-
+        if (IsInSameDirectory(&oldFileName, &fcb->FileName)) {
+          DokanNotifyReportChange0(fcb, &oldFileName,
+                                   DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
+                                       ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                       : FILE_NOTIFY_CHANGE_FILE_NAME,
+                                   FILE_ACTION_RENAMED_OLD_NAME);
+          DokanNotifyReportChange(fcb,
+                                  DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
+                                      ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                      : FILE_NOTIFY_CHANGE_FILE_NAME,
+                                  FILE_ACTION_RENAMED_NEW_NAME);
+        } else {
+          DokanNotifyReportChange0(fcb, &oldFileName,
+                                   DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
+                                       ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                       : FILE_NOTIFY_CHANGE_FILE_NAME,
+                                   FILE_ACTION_REMOVED);
+          DokanNotifyReportChange(fcb,
+                                  DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
+                                      ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                      : FILE_NOTIFY_CHANGE_FILE_NAME,
+                                  FILE_ACTION_ADDED);
+        }
         // free old file name
         ExFreePool(oldFileName.Buffer);
-
-        DokanNotifyReportChange(fcb,
-                                DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)
-                                    ? FILE_NOTIFY_CHANGE_DIR_NAME
-                                    : FILE_NOTIFY_CHANGE_FILE_NAME,
-                                FILE_ACTION_RENAMED_NEW_NAME);
       } break;
       case FileValidDataLengthInformation:
         DokanNotifyReportChange(fcb, FILE_NOTIFY_CHANGE_SIZE,

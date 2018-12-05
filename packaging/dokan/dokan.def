@@ -2,3 +2,8 @@ EXPORTS
 
 DokanMain
 DokanRemoveMountPoint
+DokanNotifyCreate
+DokanNotifyDelete
+DokanNotifyUpdate
+DokanNotifyXAttrUpdate
+DokanNotifyRename

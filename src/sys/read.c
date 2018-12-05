@@ -152,7 +152,8 @@ Return Value:
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
-    if (fcb->IsKeepalive) {
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_READ);
+    if (fcb->BlockUserModeDispatch) {
       Irp->IoStatus.Information = 0;
       status = STATUS_SUCCESS;
       __leave;
@@ -231,8 +232,8 @@ Return Value:
     //
     if (!FlagOn(Irp->Flags, IRP_PAGING_IO)) {
       // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
-      status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), Irp, eventContext,
-                                DokanOplockComplete, DokanPrePostIrp);
+      status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
+                                DokanPrePostIrp);
 
       //
       //  if FsRtlCheckOplock returns STATUS_PENDING the IRP has been posted

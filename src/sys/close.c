@@ -49,6 +49,7 @@ Return Value:
   PEVENT_CONTEXT eventContext;
   ULONG eventLength;
   PDokanFCB fcb;
+  DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, IRP_MJ_CLOSE);
 
   __try {
 
@@ -103,7 +104,18 @@ Return Value:
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_CLOSE);
     DokanFCBLockRW(fcb);
+    if (fcb->BlockUserModeDispatch) {
+      DokanLogInfo(&logger, L"Closed file with user mode dispatch blocked: %wZ",
+                   &fcb->FileName);
+      DokanFreeCCB(ccb);
+      DokanFCBUnlock(fcb);
+      DokanFreeFCB(vcb, fcb);
+      status = STATUS_SUCCESS;
+      __leave;
+    }
+
     eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 

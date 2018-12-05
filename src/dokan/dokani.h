@@ -71,6 +71,12 @@ typedef struct _DOKAN_INSTANCE {
 
   /** Current list entry informations */
   LIST_ENTRY ListEntry;
+
+  /** Signalled after the first IOCTL_EVENT_WAIT has been processed. Before
+      this, any CreateFile issued against the volume may yield a bogus handle
+      due to the kernel mode HasEventWait check in DokanDispatchCreate.
+   */
+  HANDLE SafeToAccessEvent;
 } DOKAN_INSTANCE, *PDOKAN_INSTANCE;
 
 /**

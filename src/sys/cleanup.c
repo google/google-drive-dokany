@@ -88,13 +88,18 @@ Return Value:
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_CLEANUP);
     if (fcb->IsKeepalive) {
       DokanFCBLockRW(fcb);
-      BOOLEAN keepaliveActive =
-          (fcb->FileCount == 1 && fcb->Vcb->IsKeepaliveActive);
-      fcb->Vcb->IsKeepaliveActive = FALSE;
+      BOOLEAN shouldUnmount = ccb->IsKeepaliveActive;
+      if (shouldUnmount) {
+        // Here we intentionally let the VCB-level flag stay set, because
+        // there's no sense in having an opportunity for an "operation timeout
+        // unmount" in this case.
+        ccb->IsKeepaliveActive = FALSE;
+      }
       DokanFCBUnlock(fcb);
-      if (keepaliveActive) {
+      if (shouldUnmount) {
         if (IsUnmountPendingVcb(vcb)) {
           DokanLogInfo(&logger,
                        L"Ignoring keepalive close because unmount is already in"
@@ -104,6 +109,8 @@ Return Value:
           DokanUnmount(vcb->Dcb);
         }
       }
+    }
+    if (fcb->BlockUserModeDispatch) {
       status = STATUS_SUCCESS;
       __leave;
     }
@@ -133,8 +140,8 @@ Return Value:
                   fcb->FileName.Buffer, fcb->FileName.Length);
 
     // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
-    status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), Irp, eventContext,
-                              DokanOplockComplete, DokanPrePostIrp);
+    status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
+                              DokanPrePostIrp);
     DokanFCBUnlock(fcb);
 
     //
