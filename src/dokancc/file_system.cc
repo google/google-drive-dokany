@@ -135,6 +135,9 @@ util::UniqueVarStructPtr<EVENT_INFORMATION> PrepareVarReply(
 
 }  // anonymous namespace
 
+const ULONG FileSystem::kMaxReadSize =
+    0xffffffff - (sizeof(EVENT_INFORMATION) - 8);
+
 FileSystem::FileSystem(FileCallbacks* file_callbacks,
                        VolumeCallbacks* volume_callbacks,
                        Logger* logger)
@@ -253,6 +256,21 @@ void FileSystem::BroadcastExistenceToApps(bool exists) {
   }
   SHChangeNotify(exists ? SHCNE_DRIVEADD : SHCNE_DRIVEREMOVED, SHCNF_PATH,
                  mount_point_.c_str(), nullptr);
+  if (!exists) {
+    // If we don't send a change notification for the computer root PIDL
+    // specifically, then the main view in Explorer will remove the drive, but
+    // the tree pane will not remove it until you reopen the window. This seems
+    // to be an Explorer bug.
+    PIDLIST_ABSOLUTE computer_root;
+    HRESULT result = SHGetKnownFolderIDList(FOLDERID_ComputerFolder, 0, nullptr,
+                                            &computer_root);
+    if (result != S_OK) {
+      DOKAN_LOG_INFO(
+          logger_, "Failed to get root PIDL for unmount notification.");
+      return;
+    }
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_IDLIST, computer_root, nullptr);
+  }
 }
 
 FileSystem::~FileSystem() {
@@ -374,11 +392,14 @@ void FileSystem::DispatchIo() {
   if (dispatch) {
     (this->*dispatch)(request);
   } else {
-    // TODO(drivefs-team): Remove this when there is a dispatch function for
-    // every IRP.
-    DOKAN_LOG_INFO(logger_,
-                   "No function for IRP: %u",
-                   static_cast<uint32_t>(request->MajorFunction));
+    // Office apps, for example, often try to set security and don't care if it
+    // fails. The result they get is the same as with the original DLL. If other
+    // unimplemented IRPs get invoked, it might be worth knowing.
+    if (request->MajorFunction != IRP_MJ_SET_SECURITY) {
+      DOKAN_LOG_INFO(logger_,
+                     "No function for IRP: %u",
+                     static_cast<uint32_t>(request->MajorFunction));
+    }
     auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
         sizeof(EVENT_INFORMATION));
     PrepareReply(STATUS_INVALID_PARAMETER, request, reply.get());
@@ -738,13 +759,14 @@ void FileSystem::CompleteGetVolumeInfo(
 void FileSystem::DispatchChange(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
   const ULONG info_class = request->Operation.SetFile.FileInformationClass;
-  size_t reply_size = sizeof(EVENT_INFORMATION);
+  size_t buffer_size = 0;
   if (info_class == FileRenameInformation) {
     auto rename_info = reinterpret_cast<DOKAN_RENAME_INFORMATION*>(
         reinterpret_cast<char*>(request) +
         request->Operation.SetFile.BufferOffset);
-    reply_size += rename_info->FileNameLength;
+    buffer_size = rename_info->FileNameLength;
   }
+  size_t reply_size = ComputeVarReplySize(buffer_size);
   util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
       request, reply_size);
   FileHandle* const handle = ReferenceHandle(request);
@@ -753,13 +775,13 @@ void FileSystem::DispatchChange(EVENT_CONTEXT* request) {
                    "DispatchChange with info class %u bypassed due to null"
                    " file handle.", info_class);
     CompleteChange(request, handle, info_class, STATUS_INVALID_PARAMETER,
-                   reply_size, std::move(reply));
+                   buffer_size, std::move(reply));
     return;
   }
   DOKAN_LOG_TRACE(logger_, "DispatchChange for path %S and info class %u",
                   handle->path().c_str(), info_class);
   auto complete = std::bind(&FileSystem::CompleteChange, this, request, handle,
-                            info_class, _1, reply_size, _2);
+                            info_class, _1, buffer_size, _2);
   change_handler_->Change(request, handle, info_class, std::move(reply),
                           complete);
 }
@@ -842,6 +864,29 @@ void FileSystem::CompleteFindFiles(
 
 void FileSystem::DispatchRead(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
+  const int64_t offset = request->Operation.Read.ByteOffset.QuadPart;
+  const int32_t buffer_length = request->Operation.Read.BufferLength;
+  FileHandle* handle = ReferenceHandle(request);
+  if (handle == nullptr) {
+    DOKAN_LOG_ERROR(logger_,
+                    "DispatchRead bypassed due to null file handle.");
+    util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
+        request, sizeof(EVENT_INFORMATION));
+    CompleteRead(request, handle, offset, buffer_length,
+                 STATUS_INVALID_PARAMETER, std::move(reply));
+    return;
+  }
+  if (buffer_length > kMaxReadSize) {
+    // TODO(drivefs-team): Make this work by sending 2 payloads back to the
+    // driver.
+    DOKAN_LOG_ERROR(logger_,
+                    "DispatchRead with unsupported size: %I32u", buffer_length);
+    util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
+        request, sizeof(EVENT_INFORMATION));
+    CompleteRead(request, handle, offset, buffer_length,
+                 STATUS_INVALID_PARAMETER, std::move(reply));
+    return;
+  }
   const size_t reply_size = ComputeVarReplySize(
       request->Operation.Read.BufferLength);
   // TODO(drivefs-team): we shouldn't be allocating a buffer of whatever size it
@@ -855,16 +900,6 @@ void FileSystem::DispatchRead(EVENT_CONTEXT* request) {
   // top of the same driver.
   util::UniqueVarStructPtr<EVENT_INFORMATION> reply =
       PrepareVarReply(request, reply_size);
-  const int64_t offset = request->Operation.Read.ByteOffset.QuadPart;
-  const int32_t buffer_length = request->Operation.Read.BufferLength;
-  FileHandle* handle = ReferenceHandle(request);
-  if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                   "DispatchRead bypassed due to null file handle.");
-    CompleteRead(request, handle, offset, buffer_length,
-                 STATUS_INVALID_PARAMETER, std::move(reply));
-    return;
-  }
   DOKAN_LOG_TRACE(logger_,
                   "DispatchRead for path %S, offset %I64x, length %I32u",
                   handle->path().c_str(), offset, buffer_length);
@@ -888,8 +923,9 @@ void FileSystem::CompleteRead(
     NTSTATUS status,
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply) {
   AssertCalledOnIoThread();
-  const ULONG actual_read_length = reply->BufferLength;
+  ULONG actual_read_length = 0;
   if (status == STATUS_SUCCESS) {
+    actual_read_length = reply->BufferLength;
     reply->Operation.Read.CurrentByteOffset.QuadPart =
         request->Operation.Read.ByteOffset.QuadPart + actual_read_length;
     if (actual_read_length == 0) {

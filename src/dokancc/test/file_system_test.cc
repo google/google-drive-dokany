@@ -76,6 +76,18 @@ TEST_P(MountTest, MountAndUnmountBeforeLoop) {
   // Note that errors from PostStart may be logged during this test.
 }
 
+TEST_P(MountTest, GlobalReleaseBufferOverflow) {
+  Device device(&logger_);
+  ASSERT_TRUE(device.Open(DOKAN_GLOBAL_DEVICE_NAME));
+  char buffer[800];
+  memset(buffer, 0x41, sizeof(buffer));
+  *(WORD*)buffer = 0x320;
+  *(WORD*)(buffer + 2) = 0x31a;
+  *(uint64_t*)(buffer + 776) = 0x4242424242424242;
+  ASSERT_FALSE(device.Control(0x222010, buffer, sizeof(buffer)));
+  ASSERT_EQ(ERROR_MORE_DATA, GetLastError());
+}
+
 INSTANTIATE_TEST_CASE_P(MountTests, MountTest, testing::Values(
     CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
 
@@ -970,6 +982,55 @@ TEST_P(ReadWriteTest, Read_Failure_Subsequent_Success) {
   });
 }
 
+TEST_P(ReadWriteTest, Read_4GB_Boundary_TooHigh) {
+  // This test would originally BSOD or assert depending on whether normal
+  // assertions were enabled.
+  const wchar_t path[] = L"\\test_Read_4GB_Boundary_TooHigh";
+  FileInfo info;
+  info.file_size = 0xffffffff;
+  // Note: it's too time consuming to do the whole failure range.
+  const uint64_t low_size = FileSystem::kMaxReadSize + 1;
+  callbacks_->SetUpFile(path, info);
+  callbacks_->SetFakeReadSuccess(true);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    std::vector<char> buffer(info.file_size);
+    DWORD bytes_read = 0;
+    for (DWORD chunk_size = info.file_size; chunk_size >= low_size;
+         --chunk_size) {
+      EXPECT_FALSE(ReadFile(handle, buffer.data(), chunk_size, &bytes_read,
+                            nullptr));
+    }
+    fs->Unmount();
+  });
+}
+
+TEST_P(ReadWriteTest, Read_4GB_Boundary_Success) {
+  if (!IsWindows8OrGreater()) {
+    // The read tends to fail in Windows 7 test VMs, which is not reproducible
+    // using a comparable VM image directly. We think this may be due to the
+    // build ramdisk using too much of the available RAM.
+    DOKAN_LOG_INFO(
+        &logger_,
+        "Skipping 4 GB boundary successful read test.");
+    return;
+  }
+  const wchar_t path[] = L"\\test_Read_4GB_Boundary_Success";
+  FileInfo info;
+  info.file_size = FileSystem::kMaxReadSize;
+  callbacks_->SetUpFile(path, info);
+  callbacks_->SetFakeReadSuccess(true);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    std::vector<char> buffer(info.file_size);
+    DWORD bytes_read = 0;
+    EXPECT_TRUE(ReadFile(handle, buffer.data(), FileSystem::kMaxReadSize,
+                         &bytes_read, nullptr));
+    EXPECT_EQ(FileSystem::kMaxReadSize, bytes_read);
+    fs->Unmount();
+  });
+}
+
 TEST_P(ReadWriteTest, Write_Success) {
   const wchar_t path[] = L"\\test_Write_Success";
   const char content[] = "It was a dark and stormy night.";
@@ -1069,6 +1130,49 @@ TEST_P(ReadWriteTest, Write_Failure_Subsequent_Success) {
     EXPECT_EQ(3, bytes_written);
     CloseHandle(handle);
     EXPECT_EQ("foo", callbacks_->file_content(path));
+    fs->Unmount();
+  });
+}
+
+TEST_P(ReadWriteTest, Write_4GB_Boundary_Success) {
+  if (!IsWindows8OrGreater()) {
+    // The write tends to fail in Windows 7 test VMs, which is not reproducible
+    // using a comparable VM image directly. We think this may be due to the
+    // build ramdisk using too much of the available RAM.
+    DOKAN_LOG_INFO(
+        &logger_,
+        "Skipping 4 GB boundary successful write test.");
+    return;
+  }
+  const wchar_t path[] = L"\\test_Write_4GB_Boundary_Success";
+  FileInfo info;
+  info.file_size = 0xffffffff - 1024;
+  callbacks_->SetUpFile(path, info);
+  callbacks_->SetFakeWriteSuccess(true);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_WRITE);
+    std::vector<char> buffer(info.file_size);
+    DWORD bytes_written = 0;
+    EXPECT_TRUE(WriteFile(handle, buffer.data(), info.file_size, &bytes_written,
+                          nullptr));
+    EXPECT_EQ(info.file_size, bytes_written);
+    fs->Unmount();
+  });
+}
+
+TEST_P(ReadWriteTest, Write_4GB_Boundary_Failure) {
+  // This test would originally BSOD.
+  const wchar_t path[] = L"\\test_Write_4GB_Boundary_Failure";
+  FileInfo info;
+  info.file_size = 0xffffffff;
+  callbacks_->SetUpFile(path, info);
+  callbacks_->SetWriteResult(STATUS_INVALID_PARAMETER);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_WRITE);
+    std::vector<char> buffer(info.file_size);
+    DWORD bytes_written = 0;
+    EXPECT_FALSE(WriteFile(handle, buffer.data(), info.file_size,
+                           &bytes_written, nullptr));
     fs->Unmount();
   });
 }
@@ -1449,6 +1553,117 @@ TEST_P(NotificationTest, NotifyRename_Dir_NewParent) {
     EXPECT_TRUE(result);
     EXPECT_TRUE(fs->notification_handler()->NotifyRename(
         old_path, new_path, true, false));
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_REMOVED, old_path + 1);
+    result = ReadDirectoryChangesW(
+        handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_ADDED, new_path + 1);
+    CloseHandle(overlapped.hEvent);
+    fs->Unmount();
+  });
+}
+
+// Below are variants of the above that test notifications that are
+// automatically sent by the driver in response to a rename/move being done on
+// the dokan FS from some app. The above ones are for when the owner of the
+// FileSystem object fires an explicit notification to indicate "cloud"
+// changes or similar.
+
+TEST_P(NotificationTest, ImplicitRenameNotification_File_SameParent) {
+  const wchar_t old_path[] = L"\\test_ImplicitRename_File_SameParent_old";
+  const wchar_t new_path[] = L"\\test_ImplicitRename_File_SameParent_new";
+  callbacks_->SetUpFile(old_path);
+  RunFS([&](FileSystem* fs) {
+    OVERLAPPED overlapped;
+    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    char buffer[1024];
+    bool result = ReadDirectoryChangesW(
+        handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(MoveFile((mount_point_ + old_path).c_str(),
+                         (mount_point_ + new_path).c_str()));
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_RENAMED_OLD_NAME, old_path + 1,
+        FILE_ACTION_RENAMED_NEW_NAME, new_path + 1);
+    CloseHandle(overlapped.hEvent);
+    fs->Unmount();
+  });
+}
+
+TEST_P(NotificationTest, ImplicitRenameNotification_File_NewParent) {
+  // TODO(drivefs-team): See note in the NotifyRename variant.
+  const wchar_t old_path[] = L"\\test_ImplicitRename_File_NewParent1\\file";
+  const wchar_t new_path[] = L"\\test_ImplicitRename_File_NewParent2\\file";
+  callbacks_->SetUpFile(old_path);
+  callbacks_->SetUpDir(L"\\test_ImplicitRename_File_NewParent2");
+  RunFS([&](FileSystem* fs) {
+    OVERLAPPED overlapped;
+    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    char buffer[1024];
+    bool result = ReadDirectoryChangesW(
+        handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(MoveFile((mount_point_ + old_path).c_str(),
+                         (mount_point_ + new_path).c_str()));
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_REMOVED,
+        L"test_ImplicitRename_File_NewParent1\\file");
+    result = ReadDirectoryChangesW(
+        handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_ADDED,
+        L"test_ImplicitRename_File_NewParent2\\file");
+    CloseHandle(overlapped.hEvent);
+    fs->Unmount();
+  });
+}
+
+TEST_P(NotificationTest, ImplicitRenameNotification_Dir_SameParent) {
+  const wchar_t old_path[] = L"\\test_ImplicitRename_Dir_SameParent_old";
+  const wchar_t new_path[] = L"\\test_ImplicitRename_Dir_SameParent_new";
+  callbacks_->SetUpDir(old_path);
+  RunFS([&](FileSystem* fs) {
+    OVERLAPPED overlapped;
+    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    char buffer[1024];
+    bool result = ReadDirectoryChangesW(
+        handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(MoveFile((mount_point_ + old_path).c_str(),
+                         (mount_point_ + new_path).c_str()));
+    CheckNotification(
+        handle, buffer, &overlapped, FILE_ACTION_RENAMED_OLD_NAME, old_path + 1,
+        FILE_ACTION_RENAMED_NEW_NAME, new_path + 1);
+    CloseHandle(overlapped.hEvent);
+    fs->Unmount();
+  });
+}
+
+TEST_P(NotificationTest, ImplicitRenameNotification_Dir_NewParent) {
+  // TODO(drivefs-team): This case is weird in the same ways as the file
+  // variant.
+  const wchar_t old_path[] = L"\\test_ImplicitRename_Dir_NewParent1\\dir";
+  const wchar_t new_path[] = L"\\test_ImplicitRename_Dir_NewParent2\\dir";
+  callbacks_->SetUpDir(old_path);
+  callbacks_->SetUpDir(L"\\test_ImplicitRename_Dir_NewParent2");
+  RunFS([&](FileSystem* fs) {
+    OVERLAPPED overlapped;
+    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    char buffer[1024];
+    bool result = ReadDirectoryChangesW(
+        handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
+        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(MoveFile((mount_point_ + old_path).c_str(),
+                         (mount_point_ + new_path).c_str()));
     CheckNotification(
         handle, buffer, &overlapped, FILE_ACTION_REMOVED, old_path + 1);
     result = ReadDirectoryChangesW(

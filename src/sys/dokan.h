@@ -361,9 +361,11 @@ typedef struct _DokanDiskControlBlock {
 
 } DokanDCB, *PDokanDCB;
 
+#define MAX_PATH 260
+
 typedef struct _DOKAN_CONTROL {
   ULONG Type;            // File System Type
-  WCHAR MountPoint[260]; // Mount Point
+  WCHAR MountPoint[MAX_PATH]; // Mount Point
   WCHAR UNCName[64];
   WCHAR DeviceName[64];        // Disk Device Name
   PDokanDCB Dcb;  // Always set on MOUNT_ENTRY

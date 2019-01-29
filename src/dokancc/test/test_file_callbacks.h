@@ -175,6 +175,11 @@ class TestFileCallbacks : public FileCallbacks {
       callback_invoker_(callback, read_result_);
       return;
     }
+    if (fake_read_success_) {
+      *actual_length_read = length;
+      callback_invoker_(callback, STATUS_SUCCESS);
+      return;
+    }
     *actual_length_read = 0;
     const auto it = file_content_.find(MapKey(handle));
     if (it != file_content_.end() && offset <= it->second.size()) {
@@ -193,6 +198,10 @@ class TestFileCallbacks : public FileCallbacks {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (write_result_ != STATUS_SUCCESS) {
       callback_invoker_(callback, write_result_);
+      return;
+    }
+    if (fake_write_success_) {
+      callback_invoker_(callback, STATUS_SUCCESS);
       return;
     }
     std::vector<char>& content = file_content_[MapKey(handle)];
@@ -379,6 +388,16 @@ class TestFileCallbacks : public FileCallbacks {
     return file_info_.count(path) != 0;
   }
 
+  void SetFakeReadSuccess(bool value) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    fake_read_success_ = value;
+  }
+
+  void SetFakeWriteSuccess(bool value) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    fake_write_success_ = value;
+  }
+
   void SetReadResult(NTSTATUS value) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     read_result_ = value;
@@ -466,6 +485,8 @@ class TestFileCallbacks : public FileCallbacks {
   std::map<std::wstring, size_t> create_delay_;
   std::vector<std::shared_ptr<Observer>> observers_;
   std::set<std::wstring> readonly_files_;
+  std::atomic<bool> fake_read_success_ = false;
+  std::atomic<bool> fake_write_success_ = false;
   std::atomic<NTSTATUS> read_result_ = STATUS_SUCCESS;
   std::atomic<NTSTATUS> write_result_ = STATUS_SUCCESS;
   std::atomic<NTSTATUS> flush_result_ = STATUS_SUCCESS;

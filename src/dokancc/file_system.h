@@ -66,6 +66,13 @@ enum MountResult {
 // driver.
 class __declspec(dllexport) FileSystem {
  public:
+  // The maximum amount of data a read can actually transfer at once. We are
+  // limited to less than uint32 max because the buffer gets wrapped in a
+  // DeviceIoControl payload that itself is limited to uint32 max. Currently we
+  // fail reads bigger than this size. Writes over this size are problematic at
+  // the driver level and don't make it to the DLL.
+  static const ULONG kMaxReadSize;
+
   // Creates a FileSystem that is completely inactive and not mounted until its
   // Mount method is invoked. The caller retains ownership of the callbacks and
   // logger, which must outlive this FileSystem.
