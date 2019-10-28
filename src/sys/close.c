@@ -116,7 +116,10 @@ Return Value:
       __leave;
     }
 
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventLength += fcb->FileName.Length;
+    }
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
     if (eventContext == NULL) {
@@ -133,10 +136,12 @@ Return Value:
     eventContext->Context = ccb->UserContext;
     DDbgPrint("   UserContext:%X\n", (ULONG)ccb->UserContext);
 
-    // copy the file name to be closed
-    eventContext->Operation.Close.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Close.FileName, fcb->FileName.Buffer,
-                  fcb->FileName.Length);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      // copy the file name to be closed
+      eventContext->Operation.Close.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Close.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
 
     DDbgPrint("   Free CCB:%p\n", ccb);
     DokanFreeCCB(ccb);

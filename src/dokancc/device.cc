@@ -29,8 +29,8 @@ Device::~Device() {
 
 bool Device::Open(const std::wstring& name) {
   handle_ = CreateFile(name.c_str(), GENERIC_READ | GENERIC_WRITE,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                             OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
   name_ = name;
   if (handle_ == INVALID_HANDLE_VALUE) {
     DOKAN_LOG_ERROR(logger_, "Failed to open device %S; error %u", name.c_str(),
@@ -74,19 +74,20 @@ bool Device::ControlAsync(ULONG ioctl, std::vector<char>* output,
 }
 
 bool Device::GetAsyncResult(OVERLAPPED* overlapped,
-                            DWORD* actual_output_size) {
+                            DWORD* actual_output_size,
+                            DWORD* error) {
   if (!GetOverlappedResult(handle_, overlapped, actual_output_size, FALSE)) {
-    DWORD error = GetLastError();
-    if (error == ERROR_OPERATION_ABORTED) {
+    *error = GetLastError();
+    if (*error == ERROR_OPERATION_ABORTED) {
       DOKAN_LOG_INFO(logger_,
                      "Async IOCTL aborted. This is normal during unmount.");
-    } else if (error == ERROR_OPERATION_IN_PROGRESS) {
+    } else if (*error == ERROR_OPERATION_IN_PROGRESS) {
       DOKAN_LOG_ERROR(
           logger_,
           "GetAsyncResult was called without waiting for completion.");
     } else {
       DOKAN_LOG_ERROR(logger_, "Async IOCTL failed to produce result,"
-                      " error = %u", error);
+                      " error = %u", *error);
     }
     *actual_output_size = 0;
     return false;

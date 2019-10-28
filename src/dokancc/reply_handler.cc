@@ -60,8 +60,8 @@ void ReplyHandler::SendReply(util::UniqueVarStructPtr<EVENT_INFORMATION> data,
   {
     std::unique_lock<std::mutex> lock(mutex_);
     pending_replies_.emplace(std::move(data), size);
+    state_.notify_one();
   }
-  state_.notify_all();
 }
 
 void ReplyHandler::Run() {

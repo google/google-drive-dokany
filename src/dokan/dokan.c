@@ -382,7 +382,8 @@ void ALIGN_ALLOCATION_SIZE(PLARGE_INTEGER size, PDOKAN_OPTIONS DokanOptions) {
       (size->QuadPart + (r > 0 ? DokanOptions->AllocationUnitSize - r : 0));
 }
 
-UINT WINAPI DokanLoop(PDOKAN_INSTANCE DokanInstance) {
+UINT WINAPI DokanLoop(PVOID Param) {
+  PDOKAN_INSTANCE DokanInstance = (PDOKAN_INSTANCE) Param;
   HANDLE device = INVALID_HANDLE_VALUE;
   char *buffer = NULL;
   BOOL status;

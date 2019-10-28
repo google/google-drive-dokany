@@ -46,12 +46,12 @@ struct Observer {
 
   // These fields are set by file system activity and verified by the test as
   // desired.
-  std::atomic<bool> create_invoked = false;
-  std::atomic<NTSTATUS> create_result = -1;
-  std::atomic<bool> cleanup_invoked = false;
-  std::atomic<bool> close_invoked = false;
-  std::atomic<bool> flush_invoked = false;
-  std::atomic<bool> get_delete_approval_invoked = false;
+  std::atomic<bool> create_invoked{false};
+  std::atomic<NTSTATUS> create_result{-1};
+  std::atomic<bool> cleanup_invoked{false};
+  std::atomic<bool> close_invoked{false};
+  std::atomic<bool> flush_invoked{false};
+  std::atomic<bool> get_delete_approval_invoked{false};
 
   bool Matches(const std::wstring& path_value,
                ACCESS_MASK desired_access_value,
@@ -485,12 +485,12 @@ class TestFileCallbacks : public FileCallbacks {
   std::map<std::wstring, size_t> create_delay_;
   std::vector<std::shared_ptr<Observer>> observers_;
   std::set<std::wstring> readonly_files_;
-  std::atomic<bool> fake_read_success_ = false;
-  std::atomic<bool> fake_write_success_ = false;
-  std::atomic<NTSTATUS> read_result_ = STATUS_SUCCESS;
-  std::atomic<NTSTATUS> write_result_ = STATUS_SUCCESS;
-  std::atomic<NTSTATUS> flush_result_ = STATUS_SUCCESS;
-  std::atomic<NTSTATUS> get_delete_approval_result_ = STATUS_SUCCESS;
+  std::atomic<bool> fake_read_success_{false};
+  std::atomic<bool> fake_write_success_{false};
+  std::atomic<NTSTATUS> read_result_{STATUS_SUCCESS};
+  std::atomic<NTSTATUS> write_result_{STATUS_SUCCESS};
+  std::atomic<NTSTATUS> flush_result_{STATUS_SUCCESS};
+  std::atomic<NTSTATUS> get_delete_approval_result_{STATUS_SUCCESS};
 };
 
 }  // namespace test

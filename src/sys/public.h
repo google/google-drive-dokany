@@ -376,6 +376,9 @@ typedef struct _EVENT_INFORMATION {
 #define DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH 512
 #define DOKAN_EVENT_DRIVE_LETTER_IN_USE 1024
 #define DOKAN_EVENT_LOG_OPLOCKS 2048
+#define DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT 4096
+#define DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT 8192
+#define DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED 16384
 
 // Non-exclusive bits that can be set in EVENT_DRIVER_INFO.Flags for the driver
 // to send back extra info about what happened during a mount attempt, whether

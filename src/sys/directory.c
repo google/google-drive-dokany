@@ -209,6 +209,8 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   ULONG index;
   BOOLEAN initial;
   ULONG flags = 0;
+  BOOLEAN fcbLocked = FALSE;
+
   irpSp = IoGetCurrentIrpStackLocation(Irp);
   fileObject = irpSp->FileObject;
 
@@ -280,10 +282,13 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     flags = DOKAN_MDL_ALLOCATED;
   }
 
-  DokanFCBLockRO(fcb);
-
-  // size of EVENT_CONTEXT is sum of its length and file name length
-  eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+  eventLength = sizeof(EVENT_CONTEXT);
+  if (!vcb->Dcb->SuppressFileNameInEventContext) {
+    // size of EVENT_CONTEXT is sum of its length and file name length
+    DokanFCBLockRO(fcb);
+    eventLength += fcb->FileName.Length;
+    fcbLocked = TRUE;
+  }
 
   initial = (BOOLEAN)(ccb->SearchPattern == NULL &&
                       !(DokanCCBFlagsIsSet(ccb, DOKAN_DIR_MATCH_ALL)));
@@ -304,7 +309,9 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
           ExAllocatePool(ccb->SearchPatternLength + sizeof(WCHAR));
 
       if (ccb->SearchPattern == NULL) {
-        DokanFCBUnlock(fcb);
+        if (fcbLocked) {
+          DokanFCBUnlock(fcb);
+        }
         return STATUS_INSUFFICIENT_RESOURCES;
       }
 
@@ -329,7 +336,9 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
   if (eventContext == NULL) {
-    DokanFCBUnlock(fcb);
+    if (fcbLocked) {
+      DokanFCBUnlock(fcb);
+    }
     return STATUS_INSUFFICIENT_RESOURCES;
   }
 
@@ -361,10 +370,13 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       index; // directory index which should be returned this time
 
   // copying file name(directory name)
-  eventContext->Operation.Directory.DirectoryNameLength = fcb->FileName.Length;
-  RtlCopyMemory(eventContext->Operation.Directory.DirectoryName,
-                fcb->FileName.Buffer, fcb->FileName.Length);
-  DokanFCBUnlock(fcb);
+  if (!vcb->Dcb->SuppressFileNameInEventContext) {
+    eventContext->Operation.Directory.DirectoryNameLength =
+        fcb->FileName.Length;
+    RtlCopyMemory(eventContext->Operation.Directory.DirectoryName,
+                  fcb->FileName.Buffer, fcb->FileName.Length);
+    DokanFCBUnlock(fcb);
+  }
 
   // if search pattern is specified, copy it to EventContext
   if (ccb->SearchPatternLength && ccb->SearchPattern) {

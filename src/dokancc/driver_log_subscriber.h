@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "api.h"
 #include "logger.h"
 
 namespace dokan {
@@ -15,7 +16,7 @@ namespace dokan {
 // these internally and has it active for its own whole lifetime (i.e. before
 // mounting and after unmounting). Clients using the C-based dokan DLL can
 // instantiate and use one of these separately.
-class __declspec(dllexport) DriverLogSubscriber {
+class DOKANCC_API DriverLogSubscriber {
  public:
   DriverLogSubscriber(Logger* logger) : logger_(logger) {}
   virtual ~DriverLogSubscriber();

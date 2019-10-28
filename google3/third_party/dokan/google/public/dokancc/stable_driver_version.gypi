@@ -2,7 +2,7 @@
   # Determines the latest signed driver version to be used by DriveFS.
   # Update this after checking in a new signed driver build.
   'variables': {
-    'DOKAN_VERSION': '2018-12-14_1732'
+    'DOKAN_VERSION': '2019-10-23_1918'
   },
   'includes': {
     # This presumes that copy_dokan_version.py or the equivalent has been run

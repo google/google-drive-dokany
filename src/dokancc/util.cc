@@ -40,6 +40,9 @@ void UUIDToString(const GUID guid, char* out) {
       guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
 }
 
+static std::mutex converter_mutex;
+static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+
 }  // anonymous namespace
 
 bool FileNameMatcher::Init(const std::wstring& pattern) {
@@ -147,8 +150,6 @@ bool CheckDriverVersion(const GUID& driver_version, Logger* logger) {
 }
 
 bool Narrow(const std::wstring& str, std::string* out) {
-  static std::mutex converter_mutex;
-  static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
   std::lock_guard<std::mutex> auto_lock(converter_mutex);
   try {
     *out = converter.to_bytes(str);

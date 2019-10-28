@@ -359,6 +359,35 @@ typedef struct _DokanDiskControlBlock {
   // this type of directory search is not common.
   BOOLEAN OptimizeSingleNameSearch;
 
+  // Dispatch non-root IRP_MJ_CREATE requests to user mode even if they come in
+  // before it has started polling the pending IRP queue. Historically dokan has
+  // always returned dummy handles for such requests, seemingly to avoid
+  // deadlocks where an antivirus wants a request satisfied before it will allow
+  // the user mode app to poll the queue. But this behavior creates an ambiguity
+  // as to whether we should claim files exist or not and what we should do with
+  // later I/O.
+  BOOLEAN DispatchNonRootOpensBeforeEventWait;
+
+  // Don't copy file names into requests sent to the DLL (EVENT_CONTEXT objects)
+  // unless they are logically useful, e.g. for rename requests. In most cases,
+  // the user mode code can be expected to know the file name from other
+  // parameters. When the dokancc DLL is used, it does not even forward the name
+  // strings to most callbacks.
+  BOOLEAN SuppressFileNameInEventContext;
+
+  // Avoid locking the FCB for an IRP that has the paging I/O flag set. The
+  // theory is that the memory manager has always acquired the FCB via
+  // AcquireForCreateSection before submitting paging I/O IRPs. Usually this
+  // acquisition is from the same thread where the IRP is processed. However, in
+  // the case of an NtFlushVirtualMemoryCall from user mode, the FCB could have
+  // been locked on the calling thread by that function, with the IRP being
+  // processed on the kernel's "mapped page writer" background thread, making it
+  // unsafe for the driver to re-lock the FCB. This flag is best used with
+  // SuppressFileNameInEventContext. That flag avoids both the locking and the
+  // work that would require locking, in most paging I/O cases. When both flags
+  // are set, some unavoidable work that requires locking will be done assuming
+  // the FCB lock is already effectively held exclusively.
+  BOOLEAN AssumePagingIoIsLocked;
 } DokanDCB, *PDokanDCB;
 
 #define MAX_PATH 260
@@ -1101,7 +1130,8 @@ VOID DokanCreateMountPoint(__in PDokanDCB Dcb);
 NTSTATUS DokanSendVolumeArrivalNotification(PUNICODE_STRING DeviceName);
 
 VOID FlushFcb(__in PDokanFCB fcb, __in_opt PFILE_OBJECT fileObject);
-BOOLEAN StartsWith(__in PUNICODE_STRING str, __in PUNICODE_STRING prefix);
+BOOLEAN StartsWith(__in const UNICODE_STRING* str,
+                   __in const UNICODE_STRING* prefix);
 
 static UNICODE_STRING sddl = RTL_CONSTANT_STRING(
     L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGX;;;RC)");

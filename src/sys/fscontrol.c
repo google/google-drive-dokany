@@ -742,15 +742,21 @@ DokanUserFsRequest(__in PDEVICE_OBJECT DeviceObject,
 }
 
 // Returns TRUE if |dcb| type matches |DCB| and FALSE otherwise.
-BOOLEAN MatchDokanDCBType(__in PDokanDCB Dcb, __in PDOKAN_LOGGER Logger) {
+BOOLEAN MatchDokanDCBType(__in PDokanDCB Dcb,
+                          __in PDOKAN_LOGGER Logger,
+                          __in BOOLEAN LogFailures) {
   if (!Dcb) {
-    DokanLogInfo(Logger, L"There is no DCB.");
+    if (LogFailures) {
+      DokanLogInfo(Logger, L"There is no DCB.");
+    }
     return FALSE;
   }
   PrintIdType(Dcb);
   if (GetIdentifierType(Dcb) != DCB) {
-    DokanLogInfo(Logger, L"The DCB type is actually %x; expected %x.",
-                 GetIdentifierType(Dcb), DCB);
+    if (LogFailures) {
+      DokanLogInfo(Logger, L"The DCB type is actually %x; expected %x.",
+                   GetIdentifierType(Dcb), DCB);
+    }
     return FALSE;
   }
   return TRUE;
@@ -778,7 +784,7 @@ NTSTATUS DokanMountVolume(__in PDEVICE_OBJECT DiskDevice, __in PIRP Irp) {
   PDEVICE_OBJECT deviceObject = irpSp->Parameters.MountVolume.DeviceObject;
   dcb = deviceObject->DeviceExtension;
   PDEVICE_OBJECT lowerDeviceObject = NULL;
-  while (!MatchDokanDCBType(dcb, &logger)) {
+  while (!MatchDokanDCBType(dcb, &logger, /*LogFailures=*/!hasMountedAnyDisk)) {
     PDEVICE_OBJECT parentDeviceObject =
         lowerDeviceObject ? lowerDeviceObject : deviceObject;
     lowerDeviceObject = IoGetLowerDeviceObject(parentDeviceObject);

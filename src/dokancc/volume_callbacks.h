@@ -24,6 +24,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <ntstatus.h>
 #include <windows.h>
 
+#include "api.h"
 #include "util.h"
 
 namespace dokan {
@@ -41,7 +42,7 @@ struct FreeSpace {
 // system operations that are not related to specific files. Each function must
 // invoke the callback that is its last parameter when the work completes or
 // fails.
-class __declspec(dllexport) VolumeCallbacks {
+class DOKANCC_API VolumeCallbacks {
  public:
   virtual ~VolumeCallbacks() {}
 

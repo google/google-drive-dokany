@@ -238,8 +238,9 @@ TEST(UtilTest, Narrow) {
   EXPECT_EQ("", temp);
   EXPECT_TRUE(util::Narrow(L"foobar", &temp));
   EXPECT_EQ("foobar", temp);
-  EXPECT_TRUE(util::Narrow(L"Hwæt!", &temp));
-  EXPECT_EQ("Hw\xc3\x83\xc2\xa6t!", temp);
+  // The following is an explicit wide encoding of "Hwæt!"
+  EXPECT_TRUE(util::Narrow(L"\u0048\u0077\u00e6\u0074\u0021", &temp));
+  EXPECT_EQ("Hw\xc3\xa6t!", temp);
   static const wchar_t kBadData[] = {0xd8ff, 0xffff, 0, 0};
   EXPECT_FALSE(util::Narrow(kBadData, &temp));
 }

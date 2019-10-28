@@ -138,9 +138,9 @@ BOOL DOKANAPI DokanServiceInstall(LPCWSTR ServiceName, DWORD ServiceType,
 
 BOOL DOKANAPI DokanServiceDelete(LPCWSTR ServiceName);
 
-BOOL DOKANAPI DokanNetworkProviderInstall();
+BOOL DOKANAPI DokanNetworkProviderInstall(void);
 
-BOOL DOKANAPI DokanNetworkProviderUninstall();
+BOOL DOKANAPI DokanNetworkProviderUninstall(void);
 
 BOOL DOKANAPI DokanSetDebugMode(ULONG Mode);
 

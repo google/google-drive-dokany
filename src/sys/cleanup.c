@@ -119,7 +119,10 @@ Return Value:
 
     DokanFCBLockRW(fcb);
 
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventLength += fcb->FileName.Length;
+    }
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
     if (eventContext == NULL) {
@@ -134,10 +137,12 @@ Return Value:
     eventContext->FileFlags |= DokanCCBFlagsGet(ccb);
     // DDbgPrint("   get Context %X\n", (ULONG)ccb->UserContext);
 
-    // copy the filename to EventContext from ccb
-    eventContext->Operation.Cleanup.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Cleanup.FileName,
-                  fcb->FileName.Buffer, fcb->FileName.Length);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      // copy the filename to EventContext from ccb
+      eventContext->Operation.Cleanup.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Cleanup.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
 
     // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
     status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,

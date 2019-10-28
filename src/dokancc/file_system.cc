@@ -13,6 +13,7 @@ namespace dokan {
 namespace {
 
 const wchar_t kKeepaliveFileName[] = L"\\__drive_fs_keepalive";
+const size_t kMaxDispatchFailureCount = 10;
 
 // Determines whether the given status represents either success or a benign
 // error from CreateFile.
@@ -34,6 +35,14 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   assert(!requested_mount_point.empty());
   memset(mount_request, 0, sizeof(EVENT_START));
   mount_request->UserVersion = DOKAN_DRIVER_VERSION;
+  // This needs to change with every version, or a rapid upgrade can race
+  // against the delayed removal of the prior device by DeleteDeviceDelayed.
+  // While that is pending, there can be a period of up to 60 sec where a
+  // new driver binary would fail to mount with the same GUID as the old binary.
+  // The other reason to change it is that if the driver's Mount Manager
+  // interaction logic changes, using the same GUID would leave it susceptible
+  // to unexpected behavior due to stale information associated with the GUID in
+  // the registry by the Mount Manager.
   mount_request->BaseVolumeGuid = DOKAN_DRIVER_VERSION;
   mount_request->Flags = DOKAN_EVENT_MOUNT_MANAGER |
                          DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS;
@@ -63,6 +72,12 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   }
   if (options.flags & DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH) {
     mount_request->Flags |= DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH;
+  }
+  if (options.flags & DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT) {
+    mount_request->Flags |= DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT;
+  }
+  if (options.flags & DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED) {
+    mount_request->Flags |= DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED;
   }
   memcpy_s(mount_request->MountPoint, sizeof(mount_request->MountPoint),
            requested_mount_point.c_str(),
@@ -150,7 +165,7 @@ FileSystem::FileSystem(FileCallbacks* file_callbacks,
         device_(logger) {
   memset(&overlapped_, 0, sizeof(OVERLAPPED));
   overlapped_.hEvent = CreateEvent(
-      nullptr, true, false, L"FileSystem::ReceiveIo");
+      nullptr, true, false, nullptr);
   notification_handler_ = CreateNotificationHandler(this, logger);
   if (!driver_log_subscriber_.Start()) {
     DOKAN_LOG_ERROR(logger_, "Not capturing driver log messages.");
@@ -344,6 +359,18 @@ void FileSystem::PostStart() {
 
 bool FileSystem::ReceiveIo() {
   AssertCalledOnIoThread();
+  if (dispatch_failure_count_ > kMaxDispatchFailureCount) {
+    DOKAN_LOG_INFO(
+        logger_,
+        "Stopping I/O loop due to too many consecutive dispatch errors.");
+    ResetEvent(wait_handle());
+    if (!unmount_requested_) {
+      Unmount();
+    }
+    util::SetAndNotify(&mutex_, &state_, &io_stopped_);
+    MaybeFinishUnmount();
+    return false;
+  }
   if (!device_.ControlAsync(IOCTL_EVENT_WAIT, &io_buffer_, &overlapped_)) {
     util::SetAndNotify(&mutex_, &state_, &io_stopped_);
     DOKAN_LOG_INFO(logger_, "The file system has stopped receiving I/O.");
@@ -366,11 +393,14 @@ void FileSystem::DispatchIo() {
   // request. However, the driver doesn't really work that way right now. It
   // wants to match one IOCTL_EVENT_WAIT up to one real IRP.
   DWORD actual_buffer_size = 0;
-  bool success = device_.GetAsyncResult(&overlapped_, &actual_buffer_size);
+  DWORD error = 0;
+  bool success = device_.GetAsyncResult(&overlapped_, &actual_buffer_size,
+                                        &error);
   if (!success || actual_buffer_size == 0) {
+    ++dispatch_failure_count_;
     return;
   }
-
+  dispatch_failure_count_ = 0;
   EVENT_CONTEXT* original_request = reinterpret_cast<EVENT_CONTEXT*>(
       &io_buffer_[0]);
   if (original_request->MountId != driver_mount_id_) {

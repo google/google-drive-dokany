@@ -822,8 +822,23 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   dcb = dokanControl.Dcb;
   dcb->EnableOplocks = (eventStart->Flags & DOKAN_EVENT_ENABLE_OPLOCKS) != 0;
   dcb->LogOplocks = (eventStart->Flags & DOKAN_EVENT_LOG_OPLOCKS) != 0;
+  dcb->SuppressFileNameInEventContext =
+      (eventStart->Flags & DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT)
+      != 0;
+  dcb->AssumePagingIoIsLocked =
+      (eventStart->Flags & DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED) != 0;
+  if (dcb->AssumePagingIoIsLocked && !dcb->SuppressFileNameInEventContext) {
+    DokanLogInfo(
+        &logger,
+        L"Warning: DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED is supposed to"
+        L" augment DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT, which"
+        L" has not been set for this drive.");
+  }
   dcb->OptimizeSingleNameSearch =
       (eventStart->Flags & DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH) != 0;
+  dcb->DispatchNonRootOpensBeforeEventWait =
+      (eventStart->Flags &
+          DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT) != 0;
 
   // This has 2 effects that differ from legacy behavior: (1) try to get rid of
   // the occupied drive, if it's a dokan drive owned by the same user; (2) have

@@ -20,6 +20,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "file_system_test_base.h"
 
 #include <versionhelpers.h>
+#include <windows.h>
 
 namespace dokan {
 namespace test {
@@ -30,12 +31,18 @@ const wchar_t kAllowEveryoneReadonlySddl[] = L"D:(A;;GR;;;WD)";
 const wchar_t kOwnerAccountOperatorsSddl[] = L"O:AO";
 const wchar_t kGroupAdminsSddl[] = L"G:BA";
 
+const auto kParams = testing::Values(
+    kCallbackSync,
+    kCallbackAsyncEphemeralThread,
+    kCallbackSync | kSuppressFileNameInEventContext,
+    kCallbackSync | kSuppressFileNameInEventContext | kAssumePagingIoIsLocked);
+
 class MountTest : public FileSystemTestBase {};
 
-TEST_F(MountTest, NeverMounted) {
+TEST_P(MountTest, NeverMounted) {
   // This test is basically just proving that the destructor doesn't assert if
   // we never mount.
-  EXPECT_FALSE(logger_.HasErrors());
+  EXPECT_FALSE(logger_->HasErrors());
 }
 
 TEST_P(MountTest, MountAndUnmountAfterPostStart) {
@@ -44,8 +51,8 @@ TEST_P(MountTest, MountAndUnmountAfterPostStart) {
     fs->Unmount();
   });
 
-  EXPECT_TRUE(unmounted_);
-  EXPECT_FALSE(logger_.HasErrors());
+  EXPECT_TRUE(helper_.unmounted());
+  EXPECT_FALSE(logger_->HasErrors());
 }
 
 TEST_P(MountTest, MountAndUnmountImmediately) {
@@ -53,18 +60,18 @@ TEST_P(MountTest, MountAndUnmountImmediately) {
     fs->Unmount();
   });
 
-  EXPECT_TRUE(unmounted_);
+  EXPECT_TRUE(helper_.unmounted());
   // Note that errors from PostStart may be logged during this test.
 }
 
 TEST_P(MountTest, MountAndUnmountOnIoThread) {
   RunFS([this](FileSystem* fs) {
-    PostToMainLoop([=] {
+    helper_.PostToMainLoop([=] {
       fs->Unmount();
     });
   });
 
-  EXPECT_TRUE(unmounted_);
+  EXPECT_TRUE(helper_.unmounted());
   // Note that errors from PostStart may be logged during this test.
 }
 
@@ -72,12 +79,12 @@ TEST_P(MountTest, MountAndUnmountBeforeLoop) {
   fs_->Mount(mount_point_, options_);
   fs_->Unmount();
   EXPECT_FALSE(fs_->ReceiveIo());
-  EXPECT_TRUE(unmounted_);
+  EXPECT_TRUE(helper_.unmounted());
   // Note that errors from PostStart may be logged during this test.
 }
 
 TEST_P(MountTest, GlobalReleaseBufferOverflow) {
-  Device device(&logger_);
+  Device device(logger_);
   ASSERT_TRUE(device.Open(DOKAN_GLOBAL_DEVICE_NAME));
   char buffer[800];
   memset(buffer, 0x41, sizeof(buffer));
@@ -88,8 +95,42 @@ TEST_P(MountTest, GlobalReleaseBufferOverflow) {
   ASSERT_EQ(ERROR_MORE_DATA, GetLastError());
 }
 
-INSTANTIATE_TEST_CASE_P(MountTests, MountTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+TEST_P(MountTest, MountTwoDrivesAtOnce) {
+  // This used to fail because we would use an overlapped event with the same
+  // name both times.
+  std::thread t1([&] {
+    FileSystemTestHelper helper1(L"Q:", GetParam());
+    helper1.callbacks_->SetUpFile(L"\\foo.txt", "foo");
+    helper1.RunFS(options_, [&](FileSystem* fs) {
+      HANDLE handle = helper1.Open(L"\\foo.txt", GENERIC_READ);
+      char buffer[4] = {0};
+      DWORD bytes_read = 0;
+      bool result = ReadFile(handle, buffer, 3, &bytes_read, NULL);
+      EXPECT_TRUE(result);
+      EXPECT_EQ(std::string(buffer), std::string("foo"));
+      fs->Unmount();
+    });
+    EXPECT_TRUE(helper1.unmounted());
+  });
+  std::thread t2([&] {
+    FileSystemTestHelper helper2(L"R:", GetParam());
+    helper2.callbacks_->SetUpFile(L"\\bar.txt", "bar");
+    helper2.RunFS(options_, [&](FileSystem* fs) {
+      HANDLE handle = helper2.Open(L"\\bar.txt", GENERIC_READ);
+      char buffer[4] = {0};
+      DWORD bytes_read = 0;
+      bool result = ReadFile(handle, buffer, 3, &bytes_read, NULL);
+      EXPECT_TRUE(result);
+      EXPECT_EQ(std::string(buffer), std::string("bar"));
+      fs->Unmount();
+    });
+    EXPECT_TRUE(helper2.unmounted());
+  });
+  t1.join();
+  t2.join();
+}
+
+INSTANTIATE_TEST_CASE_P(MountTests, MountTest, kParams);
 
 class OpenCloseTest : public FileSystemTestBase {};
 
@@ -117,7 +158,7 @@ TEST_P(OpenCloseTest, CreateAndClose) {
     // get dispatched unless we do subsequent I/O that keeps the file system
     // running. Hence the extra open here is to prove that the Close for
     // the test file happens if the FS stays running.
-    handle = OpenFSRootDirectory();
+    handle = helper_.OpenFSRootDirectory();
     EXPECT_TRUE(observer->close_invoked);
     fs->Unmount();
   });
@@ -150,7 +191,7 @@ TEST_P(OpenCloseTest, Create_AlternateStream) {
     // get dispatched unless we do subsequent I/O that keeps the file system
     // running. Hence the extra open here is to prove that the Close for
     // the test file happens if the FS stays running.
-    handle = OpenFSRootDirectory();
+    handle = helper_.OpenFSRootDirectory();
     EXPECT_TRUE(observer->close_invoked);
     fs->Unmount();
   });
@@ -201,8 +242,7 @@ TEST_P(OpenCloseTest, SupersedeRoot) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(OpenCloseTests, OpenCloseTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(OpenCloseTests, OpenCloseTest, kParams);
 
 class VolumeInfoTest : public FileSystemTestBase {};
 
@@ -256,7 +296,7 @@ TEST_P(VolumeInfoTest, GetFreeSpace_Success) {
 }
 
 TEST_P(VolumeInfoTest, GetFreeSpace_Error) {
-  free_space_result_ = STATUS_IO_DEVICE_ERROR;
+  helper_.set_free_space_result(STATUS_IO_DEVICE_ERROR);
   RunFS([&](FileSystem* fs) {
     ULARGE_INTEGER free_bytes_for_process_user = {0};
     ULARGE_INTEGER total_bytes = {0};
@@ -274,8 +314,7 @@ TEST_P(VolumeInfoTest, GetFreeSpace_Error) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(VolumeInfoTests, VolumeInfoTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(VolumeInfoTests, VolumeInfoTest, kParams);
 
 class MetadataTest : public FileSystemTestBase {};
 
@@ -301,7 +340,7 @@ TEST_P(MetadataTest, GetInfo_IdInfo) {
     // it, it "succeeds" but the data gets zeroed out.
     //https://msdn.microsoft.com/en-us/library/windows/desktop/aa364228(v=vs.85).aspx
     DOKAN_LOG_INFO(
-        &logger_,
+        logger_,
         "Skipping ID info test because it is unsupported on this OS version.");
     return;
   }
@@ -701,8 +740,7 @@ TEST_P(MetadataTest, ChangeAttributesAndTimes) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(MetadataTests, MetadataTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(MetadataTests, MetadataTest, kParams);
 
 class MoveDeleteTest : public FileSystemTestBase {};
 
@@ -868,8 +906,7 @@ TEST_P(MoveDeleteTest, Move_Replace_DestExists) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(MoveDeleteTests, MoveDeleteTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(MoveDeleteTests, MoveDeleteTest, kParams);
 
 class ReadWriteTest : public FileSystemTestBase {};
 
@@ -986,7 +1023,7 @@ TEST_P(ReadWriteTest, Read_4GB_Boundary_TooHigh) {
   // This test would originally BSOD or assert depending on whether normal
   // assertions were enabled.
   const wchar_t path[] = L"\\test_Read_4GB_Boundary_TooHigh";
-  FileInfo info;
+  FileInfo info{0};
   info.file_size = 0xffffffff;
   // Note: it's too time consuming to do the whole failure range.
   const uint64_t low_size = FileSystem::kMaxReadSize + 1;
@@ -1011,12 +1048,12 @@ TEST_P(ReadWriteTest, Read_4GB_Boundary_Success) {
     // using a comparable VM image directly. We think this may be due to the
     // build ramdisk using too much of the available RAM.
     DOKAN_LOG_INFO(
-        &logger_,
+        logger_,
         "Skipping 4 GB boundary successful read test.");
     return;
   }
   const wchar_t path[] = L"\\test_Read_4GB_Boundary_Success";
-  FileInfo info;
+  FileInfo info{0};
   info.file_size = FileSystem::kMaxReadSize;
   callbacks_->SetUpFile(path, info);
   callbacks_->SetFakeReadSuccess(true);
@@ -1140,12 +1177,12 @@ TEST_P(ReadWriteTest, Write_4GB_Boundary_Success) {
     // using a comparable VM image directly. We think this may be due to the
     // build ramdisk using too much of the available RAM.
     DOKAN_LOG_INFO(
-        &logger_,
+        logger_,
         "Skipping 4 GB boundary successful write test.");
     return;
   }
   const wchar_t path[] = L"\\test_Write_4GB_Boundary_Success";
-  FileInfo info;
+  FileInfo info{0};
   info.file_size = 0xffffffff - 1024;
   callbacks_->SetUpFile(path, info);
   callbacks_->SetFakeWriteSuccess(true);
@@ -1163,7 +1200,7 @@ TEST_P(ReadWriteTest, Write_4GB_Boundary_Success) {
 TEST_P(ReadWriteTest, Write_4GB_Boundary_Failure) {
   // This test would originally BSOD.
   const wchar_t path[] = L"\\test_Write_4GB_Boundary_Failure";
-  FileInfo info;
+  FileInfo info{0};
   info.file_size = 0xffffffff;
   callbacks_->SetUpFile(path, info);
   callbacks_->SetWriteResult(STATUS_INVALID_PARAMETER);
@@ -1177,6 +1214,38 @@ TEST_P(ReadWriteTest, Write_4GB_Boundary_Failure) {
   });
 }
 
+// Note that this does not hit the hang described in b/140938460; there is an
+// unknown ingredient this test lacks that triggers the use of the kernel
+// background thread to do the write.
+TEST_P(ReadWriteTest, MemoryMappedWriteAndFlush) {
+  const wchar_t path[] = L"\\test_MemoryMappedWriteAndFlush";
+  FileInfo info{0};
+  info.file_size = 262144;
+  callbacks_->SetUpFile(path, info);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ | GENERIC_WRITE);
+    HANDLE mapping = CreateFileMapping(handle, nullptr, PAGE_READWRITE, 0,
+                                       info.file_size, nullptr);
+    EXPECT_NE(mapping, INVALID_HANDLE_VALUE);
+    char* data = reinterpret_cast<char*>(MapViewOfFile(mapping, FILE_MAP_WRITE,
+                                                       0, 0, 131072));
+    ASSERT_NE(data, nullptr);
+    for (size_t i = 0; i < 131072; ++i) {
+      data[i] = i % 256;
+    }
+    IO_STATUS_BLOCK status_block{0};
+    HANDLE process = GetCurrentProcess();
+    size_t flush_size = 131072;
+    NTSTATUS status = NtFlushVirtualMemory(process,
+                                           reinterpret_cast<void**>(&data),
+                                           &flush_size, &status_block);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    UnmapViewOfFile(data);
+    CloseHandle(mapping);
+    fs->Unmount();
+  });
+}
+
 // TODO(drivefs-team): Add tests that require the NT API:
 // - NtQueryInformationFile for GetInfo information classes that are not usable
 //   with GetFileInformationByHandleEx.
@@ -1185,19 +1254,19 @@ TEST_P(ReadWriteTest, Write_4GB_Boundary_Failure) {
 class SecurityTest : public FileSystemTestBase {};
 
 TEST_P(SecurityTest, SecurityDescriptorEnforcement) {
-  SetSecurityDescriptor(kAllowEveryoneSddl,
-                        &options_.volume_security_descriptor,
-                        &options_.volume_security_descriptor_length);
+  helper_.SetSecurityDescriptor(kAllowEveryoneSddl,
+                                &options_.volume_security_descriptor,
+                                &options_.volume_security_descriptor_length);
   RunFS([&] (FileSystem* fs) {
     // Make sure we can access the device normally.
-    HANDLE handle = OpenFSRootDirectory();
+    HANDLE handle = helper_.OpenFSRootDirectory();
     EXPECT_NE(INVALID_HANDLE_VALUE, handle);
     CloseHandle(handle);
 
     // If we say we're not in Everyone, we should not be able to access the
     // device.
     RemoveSidFromThread(kEveryoneSddl);
-    handle = OpenFSRootDirectory();
+    handle = helper_.OpenFSRootDirectory();
     EXPECT_EQ(INVALID_HANDLE_VALUE, handle);
     EXPECT_EQ(ERROR_ACCESS_DENIED, GetLastError());
 
@@ -1211,10 +1280,10 @@ TEST_P(SecurityTest, GetSecurity_Success) {
   sddl += kOwnerAccountOperatorsSddl;
   sddl += kGroupAdminsSddl;
   sddl += kAllowEveryoneSddl;
-  SetSecurityDescriptor(sddl, &options_.volume_security_descriptor,
+  helper_.SetSecurityDescriptor(sddl, &options_.volume_security_descriptor,
                         &options_.volume_security_descriptor_length);
   RunFS([&] (FileSystem* fs) {
-    HANDLE handle = OpenFSRootDirectory();
+    HANDLE handle = helper_.OpenFSRootDirectory();
     EXPECT_NE(INVALID_HANDLE_VALUE, handle);
     SECURITY_INFORMATION info = DACL_SECURITY_INFORMATION |
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
@@ -1240,10 +1309,10 @@ TEST_P(SecurityTest, GetSecurity_InsufficientBuffer) {
   sddl += kOwnerAccountOperatorsSddl;
   sddl += kGroupAdminsSddl;
   sddl += kAllowEveryoneSddl;
-  SetSecurityDescriptor(sddl, &options_.volume_security_descriptor,
-                        &options_.volume_security_descriptor_length);
+  helper_.SetSecurityDescriptor(sddl, &options_.volume_security_descriptor,
+                                &options_.volume_security_descriptor_length);
   RunFS([&] (FileSystem* fs) {
-    HANDLE handle = OpenFSRootDirectory();
+    HANDLE handle = helper_.OpenFSRootDirectory();
     EXPECT_NE(INVALID_HANDLE_VALUE, handle);
     SECURITY_INFORMATION info = DACL_SECURITY_INFORMATION |
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
@@ -1263,14 +1332,15 @@ TEST_P(SecurityTest, GetSecurity_ReadonlyDescriptor) {
   base_sddl += kOwnerAccountOperatorsSddl;
   base_sddl += kGroupAdminsSddl;
   base_sddl += kAllowEveryoneSddl;
-  SetSecurityDescriptor(base_sddl, &options_.volume_security_descriptor,
-                        &options_.volume_security_descriptor_length);
+  helper_.SetSecurityDescriptor(base_sddl, &options_.volume_security_descriptor,
+                                &options_.volume_security_descriptor_length);
   std::wstring readonly_sddl;
   readonly_sddl += kOwnerAccountOperatorsSddl;
   readonly_sddl += kGroupAdminsSddl;
   readonly_sddl += kAllowEveryoneReadonlySddl;
-  SetSecurityDescriptor(readonly_sddl, &options_.readonly_security_descriptor,
-                        &options_.readonly_security_descriptor_length);
+  helper_.SetSecurityDescriptor(readonly_sddl,
+                                &options_.readonly_security_descriptor,
+                                &options_.readonly_security_descriptor_length);
 
   const wchar_t readonly_path[] =
       L"\\test_GetSecurity_ReadonlyDescriptor\\readonly_file";
@@ -1282,9 +1352,9 @@ TEST_P(SecurityTest, GetSecurity_ReadonlyDescriptor) {
   callbacks_->SetUseReadonlySecurityDescriptor(readonly_path, true);
   RunFS([&](FileSystem* fs) {
     std::wstring actual_readonly_sddl =
-        ReadSecurityDescriptorAsSddl(readonly_path, 1024, false);
+        helper_.ReadSecurityDescriptorAsSddl(readonly_path, 1024, false);
     std::wstring actual_base_sddl =
-        ReadSecurityDescriptorAsSddl(writable_path, 1024, false);
+        helper_.ReadSecurityDescriptorAsSddl(writable_path, 1024, false);
     EXPECT_EQ(readonly_sddl, actual_readonly_sddl);
     EXPECT_EQ(base_sddl, actual_base_sddl);
     fs->Unmount();
@@ -1293,7 +1363,7 @@ TEST_P(SecurityTest, GetSecurity_ReadonlyDescriptor) {
 
 TEST_P(SecurityTest, GetSecurity_NoSecurityDescriptor) {
   RunFS([&] (FileSystem* fs) {
-    HANDLE handle = OpenFSRootDirectory();
+    HANDLE handle = helper_.OpenFSRootDirectory();
     EXPECT_NE(INVALID_HANDLE_VALUE, handle);
     SECURITY_INFORMATION info = DACL_SECURITY_INFORMATION |
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
@@ -1307,8 +1377,7 @@ TEST_P(SecurityTest, GetSecurity_NoSecurityDescriptor) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(SecurityTests, SecurityTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(SecurityTests, SecurityTest, kParams);
 
 TEST_P(ReadWriteTest, Flush_Success) {
   const wchar_t path[] = L"\\test_Flush_Success";
@@ -1349,8 +1418,7 @@ TEST_P(ReadWriteTest, Flush_Error) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(ReadWriteTests, ReadWriteTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(ReadWriteTests, ReadWriteTest, kParams);
 
 class NotificationTest : public FileSystemTestBase {};
 
@@ -1358,7 +1426,7 @@ TEST_P(NotificationTest, NotifyCreate_File) {
   const wchar_t path[] = L"\\test_NotifyCreate_File";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1375,7 +1443,7 @@ TEST_P(NotificationTest, NotifyCreate_Dir) {
   const wchar_t path[] = L"\\test_NotifyCreate_Dir";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1392,7 +1460,7 @@ TEST_P(NotificationTest, NotifyUpdate) {
   const wchar_t path[] = L"\\test_NotifyUpdate";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_ATTRIBUTES, nullptr,
@@ -1412,7 +1480,8 @@ TEST_P(NotificationTest, NotifyUpdate_NonRoot) {
   callbacks_->SetUpDir(path);
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenDirForOverlapped(mount_point_ + path, &overlapped);
+    HANDLE handle = helper_.OpenDirForOverlapped(mount_point_ + path,
+                                                 &overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_ATTRIBUTES, nullptr,
@@ -1430,7 +1499,7 @@ TEST_P(NotificationTest, NotifyDelete_File) {
   const wchar_t path[] = L"\\test_NotifyDelete_File";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1448,7 +1517,7 @@ TEST_P(NotificationTest, NotifyDelete_Dir) {
   const wchar_t path[] = L"\\test_NotifyDelete_Dir";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1467,7 +1536,7 @@ TEST_P(NotificationTest, NotifyRename_File_SameParent) {
   const wchar_t new_path[] = L"\\test_NotifyRename_File_SameParent_new";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1494,7 +1563,7 @@ TEST_P(NotificationTest, NotifyRename_File_NewParent) {
   const wchar_t new_path[] = L"\\test_NotifyRename_File_NewParent2\\file";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1522,7 +1591,7 @@ TEST_P(NotificationTest, NotifyRename_Dir_SameParent) {
   const wchar_t new_path[] = L"\\test_NotifyRename_Dir_SameParent_new";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1545,7 +1614,7 @@ TEST_P(NotificationTest, NotifyRename_Dir_NewParent) {
   const wchar_t new_path[] = L"\\test_NotifyRename_Dir_NewParent2\\dir";
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1578,7 +1647,7 @@ TEST_P(NotificationTest, ImplicitRenameNotification_File_SameParent) {
   callbacks_->SetUpFile(old_path);
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1602,7 +1671,7 @@ TEST_P(NotificationTest, ImplicitRenameNotification_File_NewParent) {
   callbacks_->SetUpDir(L"\\test_ImplicitRename_File_NewParent2");
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
@@ -1631,7 +1700,7 @@ TEST_P(NotificationTest, ImplicitRenameNotification_Dir_SameParent) {
   callbacks_->SetUpDir(old_path);
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, false, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1656,7 +1725,7 @@ TEST_P(NotificationTest, ImplicitRenameNotification_Dir_NewParent) {
   callbacks_->SetUpDir(L"\\test_ImplicitRename_Dir_NewParent2");
   RunFS([&](FileSystem* fs) {
     OVERLAPPED overlapped;
-    HANDLE handle = OpenFSRootForOverlapped(&overlapped);
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
     char buffer[1024];
     bool result = ReadDirectoryChangesW(
         handle, buffer, 1024, true, FILE_NOTIFY_CHANGE_DIR_NAME, nullptr,
@@ -1677,8 +1746,7 @@ TEST_P(NotificationTest, ImplicitRenameNotification_Dir_NewParent) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(NotificationTests, NotificationTest, testing::Values(
-    CallbackThreading::SYNC, CallbackThreading::ASYNC_EPHEMERAL_THREAD));
+INSTANTIATE_TEST_CASE_P(NotificationTests, NotificationTest, kParams);
 
 }  // namespace test
 }  // namespace dokan

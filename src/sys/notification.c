@@ -218,14 +218,16 @@ VOID RetryIrps(__in PIRP_LIST PendingRetryIrp) {
   LIST_ENTRY retryList;
   PIRP_ENTRY irpEntry;
   PIRP irp;
+  PDEVICE_OBJECT deviceObject = NULL;
 
   MoveIrpList(PendingRetryIrp, &retryList);
   while (!IsListEmpty(&retryList)) {
     listHead = RemoveHeadList(&retryList);
     irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
     irp = irpEntry->Irp;
+    deviceObject = irpEntry->IrpSp->DeviceObject;
     DokanFreeIrpEntry(irpEntry);
-    DokanBuildRequest(irpEntry->IrpSp->DeviceObject, irp);
+    DokanBuildRequest(deviceObject, irp);
   }
 }
 

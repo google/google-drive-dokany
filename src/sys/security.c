@@ -36,6 +36,7 @@ DokanDispatchQuerySecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   ULONG eventLength;
   PEVENT_CONTEXT eventContext;
   ULONG flags = 0;
+  BOOLEAN fcbLocked = FALSE;
 
   __try {
     DDbgPrint("==> DokanQuerySecurity\n");
@@ -92,8 +93,12 @@ DokanDispatchQuerySecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       DDbgPrint("    LABEL_SECURITY_INFORMATION\n");
     }
 
-    DokanFCBLockRO(fcb);
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      DokanFCBLockRO(fcb);
+      fcbLocked = TRUE;
+      eventLength += fcb->FileName.Length;
+    }
     eventContext = AllocateEventContext(dcb, Irp, eventLength, ccb);
 
     if (eventContext == NULL) {
@@ -118,14 +123,15 @@ DokanDispatchQuerySecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     eventContext->Operation.Security.SecurityInformation = *securityInfo;
     eventContext->Operation.Security.BufferLength = bufferLength;
 
-    eventContext->Operation.Security.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Security.FileName,
-                  fcb->FileName.Buffer, fcb->FileName.Length);
-
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventContext->Operation.Security.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Security.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
     status = DokanRegisterPendingIrp(DeviceObject, Irp, eventContext, flags);
 
   } __finally {
-    if (fcb)
+    if (fcbLocked)
       DokanFCBUnlock(fcb);
 
     DokanCompleteIrpRequest(Irp, status, info);
@@ -218,6 +224,7 @@ DokanDispatchSetSecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   ULONG securityDescLength;
   ULONG eventLength;
   PEVENT_CONTEXT eventContext;
+  BOOLEAN fcbLocked = FALSE;
 
   __try {
     DDbgPrint("==> DokanSetSecurity\n");
@@ -253,7 +260,10 @@ DokanDispatchSetSecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       status = STATUS_INSUFFICIENT_RESOURCES;
       __leave;
     }
-    DokanFCBLockRO(fcb);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      DokanFCBLockRO(fcb);
+      fcbLocked = TRUE;
+    }
 
     securityInfo = &irpSp->Parameters.SetSecurity.SecurityInformation;
 
@@ -281,7 +291,10 @@ DokanDispatchSetSecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     // PSECURITY_DESCRIPTOR has to be aligned to a 4-byte boundary for use with win32 functions.
     // So we add 3 bytes here, to make sure we have extra room to align BufferOffset.
     eventLength =
-        sizeof(EVENT_CONTEXT) + securityDescLength + fcb->FileName.Length + 3;
+        sizeof(EVENT_CONTEXT) + securityDescLength + 3;
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventLength += fcb->FileName.Length;
+    }
 
     if (EVENT_CONTEXT_MAX_SIZE < eventLength) {
       // TODO: Handle this case like DispatchWrite.
@@ -304,20 +317,24 @@ DokanDispatchSetSecurity(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     // Align BufferOffset by adding 3, then zeroing the last 2 bits.
     eventContext->Operation.SetSecurity.BufferOffset =
         (FIELD_OFFSET(EVENT_CONTEXT, Operation.SetSecurity.FileName[0]) +
-         fcb->FileName.Length + sizeof(WCHAR) + 3) & ~0x03;
+         sizeof(WCHAR) + 3) & ~0x03;
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventContext->Operation.SetSecurity.BufferOffset =
+          (FIELD_OFFSET(EVENT_CONTEXT, Operation.SetSecurity.FileName[0]) +
+           fcb->FileName.Length + sizeof(WCHAR) + 3) & ~0x03;
+      eventContext->Operation.SetSecurity.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.SetSecurity.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
 
     RtlCopyMemory((PCHAR)eventContext +
                       eventContext->Operation.SetSecurity.BufferOffset,
                   securityDescriptor, securityDescLength);
 
-    eventContext->Operation.SetSecurity.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.SetSecurity.FileName,
-                  fcb->FileName.Buffer, fcb->FileName.Length);
-
     status = DokanRegisterPendingIrp(DeviceObject, Irp, eventContext, 0);
 
   } __finally {
-    if (fcb)
+    if (fcbLocked)
       DokanFCBUnlock(fcb);
 
     DokanCompleteIrpRequest(Irp, status, info);

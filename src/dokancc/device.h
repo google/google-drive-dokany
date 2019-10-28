@@ -25,6 +25,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <vector>
 #include <windows.h>
 
+#include "api.h"
 #include "logger.h"
 
 namespace dokan {
@@ -41,22 +42,22 @@ class Device {
   // Opens the device with the given name, which logs errors to the given
   // logger. If successful, the handle stays open until the Device object is
   // destroyed.
-  bool Open(const std::wstring& name);
+  DOKANCC_API bool Open(const std::wstring& name);
 
   bool is_open() const {
     return handle_ != INVALID_HANDLE_VALUE;
   }
 
   // Closes the device, if it has been opened.
-  ~Device();
+  DOKANCC_API ~Device();
 
   // Invokes a control function on the device that takes no input and returns no
   // output.
-  bool Control(ULONG ioctl);
+  DOKANCC_API bool Control(ULONG ioctl);
 
   // Invokes an FSCTL control function on a specific file object owned by the
   // device, which takes no input and returns no ouptut.
-  bool Control(HANDLE file_handle, ULONG fsctl);
+  DOKANCC_API bool Control(HANDLE file_handle, ULONG fsctl);
 
   // Invokes a control function on the device that takes fixed-size input and
   // returns no output.
@@ -110,15 +111,16 @@ class Device {
   // a variable-length output structure. The output vector passed in should
   // be pre-sized to fit the expected data. This function does not change
   // output->size() and does not yield an actual_output_size greater than that.
-  bool ControlAsync(ULONG ioctl, std::vector<char>* output,
-                    OVERLAPPED* overlapped);
+  DOKANCC_API bool ControlAsync(ULONG ioctl, std::vector<char>* output,
+                                OVERLAPPED* overlapped);
 
   // Retrieves the result from a ControlAsync request. This should not be done
   // until the event in the overlapped structure is signalled.
-  bool GetAsyncResult(OVERLAPPED* overlapped, DWORD* actual_output_size);
+  DOKANCC_API bool GetAsyncResult(OVERLAPPED* overlapped,
+                                  DWORD* actual_output_size, DWORD* error);
 
  private:
-  void LogGenericResult(ULONG ioctl);
+  DOKANCC_API void LogGenericResult(ULONG ioctl);
 
   std::wstring name_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;

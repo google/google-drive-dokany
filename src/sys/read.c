@@ -186,10 +186,13 @@ Return Value:
       DokanFCBUnlock(fcb);
     }
 
-    DokanFCBLockRO(fcb);
-    fcbLocked = TRUE;
     // length of EventContext is sum of file name length and itself
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      DokanFCBLockRO(fcb);
+      fcbLocked = TRUE;
+      eventLength += fcb->FileName.Length;
+    }
 
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
     if (eventContext == NULL) {
@@ -222,15 +225,21 @@ Return Value:
     eventContext->Operation.Read.BufferLength = irpSp->Parameters.Read.Length;
 
     // copy the accessed file name
-    eventContext->Operation.Read.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Read.FileName, fcb->FileName.Buffer,
-                  fcb->FileName.Length);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventContext->Operation.Read.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Read.FileName, fcb->FileName.Buffer,
+                    fcb->FileName.Length);
+    }
 
     //
     //  We now check whether we can proceed based on the state of
     //  the file oplocks.
     //
     if (!FlagOn(Irp->Flags, IRP_PAGING_IO)) {
+      if (!fcbLocked) {
+        DokanFCBLockRO(fcb);
+        fcbLocked = TRUE;
+      }
       // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
       status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
                                 DokanPrePostIrp);

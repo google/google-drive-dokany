@@ -22,6 +22,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <cstdarg>
 
+#include "api.h"
+
 namespace dokan {
 
 struct LogSite {
@@ -47,7 +49,7 @@ struct LogSite {
 // An object that handles the writing of log messages. Logger functions may be
 // invoked concurrently on different threads, and subclasses must be
 // thread-safe.
-class __declspec(dllexport) Logger {
+class DOKANCC_API Logger {
  public:
   virtual ~Logger() {}
 

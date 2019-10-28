@@ -27,6 +27,7 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   NTSTATUS status = STATUS_NOT_IMPLEMENTED;
   PIO_STACK_LOCATION irpSp;
   PFILE_OBJECT fileObject;
+  FILE_INFORMATION_CLASS infoClass;
   PDokanCCB ccb;
   PDokanFCB fcb = NULL;
   PDokanVCB vcb;
@@ -34,6 +35,7 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   ULONG eventLength;
   PEVENT_CONTEXT eventContext;
   BOOLEAN isNormalized = FALSE;
+  BOOLEAN fcbLocked = FALSE;
 
   // PAGED_CODE();
 
@@ -42,9 +44,9 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     irpSp = IoGetCurrentIrpStackLocation(Irp);
     fileObject = irpSp->FileObject;
+    infoClass = irpSp->Parameters.QueryFile.FileInformationClass;
 
-    DDbgPrint("  FileInfoClass %d\n",
-              irpSp->Parameters.QueryFile.FileInformationClass);
+    DDbgPrint("  FileInfoClass %d\n", infoClass);
     DDbgPrint("  ProcessId %lu\n", IoGetRequestorProcessId(Irp));
 
     if (fileObject == NULL) {
@@ -75,9 +77,12 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     fcb = ccb->Fcb;
     ASSERT(fcb != NULL);
 
-    OplockDebugRecordMajorFunction(fcb, IRP_MJ_QUERY_INFORMATION);    
-    DokanFCBLockRO(fcb);
-    switch (irpSp->Parameters.QueryFile.FileInformationClass) {
+    OplockDebugRecordMajorFunction(fcb, IRP_MJ_QUERY_INFORMATION);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      DokanFCBLockRO(fcb);
+      fcbLocked = TRUE;
+    }
+    switch (infoClass) {
     case FileBasicInformation:
       DDbgPrint("  FileBasicInformation\n");
       break;
@@ -110,6 +115,10 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
       DDbgPrint("  FileNameInformation\n");
 
+      if (!fcbLocked) {
+        DokanFCBLockRO(fcb);
+        fcbLocked = TRUE;
+      }
       nameInfo = (PFILE_NAME_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
       ASSERT(nameInfo != NULL);
 
@@ -199,13 +208,36 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       break;
     case FileNetworkPhysicalNameInformation:
       DDbgPrint("  FileNetworkPhysicalNameInformation\n");
+      // This info class is generally not worth passing to the DLL. It will be
+      // filled in with info that is accessible to the driver. If copying of the
+      // file name to the DLL is suppressed, we just deal with it in the driver.
+      if (vcb->Dcb->SuppressFileNameInEventContext) {
+        if (!fcbLocked) {
+          DokanFCBLockRO(fcb);
+          fcbLocked = TRUE;
+        }
+        if (irpSp->Parameters.QueryFile.Length <
+                sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION) +
+                fcb->FileName.Length - sizeof(WCHAR)) {
+          status = STATUS_BUFFER_OVERFLOW;
+          __leave;
+        }
+        PFILE_NETWORK_PHYSICAL_NAME_INFORMATION netInfo =
+            (PFILE_NETWORK_PHYSICAL_NAME_INFORMATION)
+                Irp->AssociatedIrp.SystemBuffer;
+        info = FIELD_OFFSET(FILE_NETWORK_PHYSICAL_NAME_INFORMATION,
+                            FileName[0]) + fcb->FileName.Length;
+        RtlCopyMemory(&netInfo->FileName[0], fcb->FileName.Buffer,
+                      fcb->FileName.Length);
+        status = STATUS_SUCCESS;
+        __leave;
+      }
       break;
     case FileRemoteProtocolInformation:
       DDbgPrint("  FileRemoteProtocolInformation\n");
       break;
     default:
-      DDbgPrint("  unknown type:%d\n",
-                irpSp->Parameters.QueryFile.FileInformationClass);
+      DDbgPrint("  unknown type:%d\n", infoClass);
       break;
     }
 
@@ -218,7 +250,11 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     // calculate the length of EVENT_CONTEXT
     // sum of it's size and file name length
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext
+        || infoClass == FileAllInformation) {
+      eventLength += fcb->FileName.Length;
+    }
 
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
@@ -230,23 +266,25 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     eventContext->Context = ccb->UserContext;
     // DDbgPrint("   get Context %X\n", (ULONG)ccb->UserContext);
 
-    eventContext->Operation.File.FileInformationClass =
-        irpSp->Parameters.QueryFile.FileInformationClass;
+    eventContext->Operation.File.FileInformationClass = infoClass;
 
     // bytes length which is able to be returned
     eventContext->Operation.File.BufferLength =
         irpSp->Parameters.QueryFile.Length;
 
     // copy file name to EventContext from FCB
-    eventContext->Operation.File.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.File.FileName, fcb->FileName.Buffer,
-                  fcb->FileName.Length);
+    if (!vcb->Dcb->SuppressFileNameInEventContext
+        || infoClass == FileAllInformation) {
+      eventContext->Operation.File.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.File.FileName, fcb->FileName.Buffer,
+                    fcb->FileName.Length);
+    }
 
     // register this IRP to pending IPR list
     status = DokanRegisterPendingIrp(DeviceObject, Irp, eventContext, 0);
 
   } __finally {
-    if (fcb)
+    if (fcbLocked)
       DokanFCBUnlock(fcb);
 
     DokanCompleteIrpRequest(Irp, status, info);
@@ -319,7 +357,8 @@ VOID DokanCompleteQueryInformation(__in PIRP_ENTRY IrpEntry,
   DDbgPrint("<== DokanCompleteQueryInformation\n");
 }
 
-BOOLEAN StartsWith(__in PUNICODE_STRING str, __in PUNICODE_STRING prefix) {
+BOOLEAN StartsWith(__in const UNICODE_STRING* str,
+                   __in const UNICODE_STRING* prefix) {
   if (prefix == NULL || prefix->Length == 0) {
     return TRUE;
   }
@@ -557,8 +596,10 @@ DokanDispatchSetInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     // calcurate the size of EVENT_CONTEXT
     // it is sum of file name length and size of FileInformation
-    DokanFCBLockRW(fcb);
-    fcbLocked = TRUE;
+    if (!isPagingIo || !vcb->Dcb->AssumePagingIoIsLocked) {
+      DokanFCBLockRW(fcb);
+      fcbLocked = TRUE;
+    }
     eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length +
                   irpSp->Parameters.SetFile.Length;
 

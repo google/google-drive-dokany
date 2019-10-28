@@ -28,6 +28,10 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #ifndef FILEINFO_H_
 #define FILEINFO_H_
 
+#ifndef _WINTERNL_
+typedef LONG NTSTATUS;
+#endif
+
 #define IRP_MJ_CREATE 0x00
 #define IRP_MJ_CREATE_NAMED_PIPE 0x01
 #define IRP_MJ_CLOSE 0x02
@@ -1283,6 +1287,11 @@ NTSTATUS NTAPI NtCreateFile(PHANDLE FileHandle,
                             ULONG CreateOptions,
                             PVOID EaBuffer,
                             ULONG EaLength);
+
+NTSTATUS NTAPI NtFlushVirtualMemory(HANDLE ProcessHandle,
+                                    PVOID *BaseAddress,
+                                    PSIZE_T RegionSize,
+                                    PIO_STATUS_BLOCK IoStatus);
 
 }
 

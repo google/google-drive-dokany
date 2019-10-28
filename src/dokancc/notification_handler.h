@@ -23,6 +23,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <memory>
 #include <string>
 
+#include "api.h"
 #include "logger.h"
 
 class FileSystem;
@@ -43,7 +44,7 @@ namespace dokan {
 //   operations, some of which need to be dispatched on the I/O thread. In a
 //   pure environment with no filter drivers, it would be safe to use the I/O
 //   thread.
-class __declspec(dllexport) NotificationHandler {
+class DOKANCC_API NotificationHandler {
  public:
   virtual ~NotificationHandler() {}
 

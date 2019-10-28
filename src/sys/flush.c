@@ -60,8 +60,10 @@ DokanDispatchFlush(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     ASSERT(fcb != NULL);
     OplockDebugRecordMajorFunction(fcb, IRP_MJ_FLUSH_BUFFERS);
     DokanFCBLockRO(fcb);
-
-    eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
+    eventLength = sizeof(EVENT_CONTEXT);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventLength += fcb->FileName.Length;
+    }
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
     if (eventContext == NULL) {
@@ -72,10 +74,12 @@ DokanDispatchFlush(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     eventContext->Context = ccb->UserContext;
     DDbgPrint("   get Context %X\n", (ULONG)ccb->UserContext);
 
-    // copy file name to be flushed
-    eventContext->Operation.Flush.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Flush.FileName, fcb->FileName.Buffer,
-                  fcb->FileName.Length);
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      // copy file name to be flushed
+      eventContext->Operation.Flush.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Flush.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
 
     CcUninitializeCacheMap(fileObject, NULL, NULL);
     // fileObject->Flags &= FO_CLEANUP_COMPLETE;

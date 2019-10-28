@@ -25,6 +25,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #define WIN32_NO_STATUS
 #include <windows.h>
+#include <rpc.h>
 #undef WIN32_NO_STATUS
 #include <stdio.h>
 

@@ -22,6 +22,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <ntstatus.h>
 #include <windows.h>
+#include <winioctl.h>
 
 #include <atomic>
 #include <memory>
@@ -87,7 +88,7 @@ class ReplyHandler {
 
   Device* const device_;
   Logger* const logger_;
-  std::atomic<size_t> busy_count_ = 0;
+  std::atomic<size_t> busy_count_{0};
   std::vector<std::unique_ptr<std::thread>> threads_;
 
   std::condition_variable state_;
@@ -96,7 +97,7 @@ class ReplyHandler {
   // These are guarded by mutex_ and part of state_. stopped_ can be read
   // without mutex_.
   std::queue<Reply> pending_replies_;
-  std::atomic<bool> stopped_ = false;
+  std::atomic<bool> stopped_{false};
 };
 
 }  // namespace dokan

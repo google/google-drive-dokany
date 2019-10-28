@@ -33,6 +33,12 @@ static const UNICODE_STRING keepAliveFileName =
 static const UNICODE_STRING notificationFileName =
     RTL_CONSTANT_STRING(DOKAN_NOTIFICATION_FILE_NAME);
 
+static const UNICODE_STRING systemVolumeInformationFileName =
+    RTL_CONSTANT_STRING(L"\\System Volume Information");
+
+static const UNICODE_STRING snapvolCfgFileName =
+    RTL_CONSTANT_STRING(L"\\snapvol.cfg");
+
 // We must NOT call without VCB lock
 PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
                            __in ULONG FileNameLength) {
@@ -590,26 +596,45 @@ Return Value:
     }
 
     if (!vcb->HasEventWait) {
-      DDbgPrint("  Here we only go in if some antivirus software tries to "
-                "create files before startup is finished.\n");
-      if (fileObject->FileName.Length > 0) {
-        DDbgPrint("  Verify if the system tries to access System Volume\n");
-        UNICODE_STRING systemVolume;
-        RtlInitUnicodeString(&systemVolume, L"\\System Volume Information");
-        BOOLEAN isSystemVolumeAccess =
-            StartsWith(&fileObject->FileName, &systemVolume);
-        if (isSystemVolumeAccess) {
-          DDbgPrint("  It's an access to System Volume, so don't return "
-                    "SUCCESS. We don't have one.\n");
-          status = STATUS_NO_SUCH_FILE;
-          __leave;
+      if (fileObject->FileName.Length > 2 &&
+          dcb->DispatchNonRootOpensBeforeEventWait) {
+        DokanLogInfo(
+            &logger,
+            L"Dispatching open request before IOCTL_EVENT_WAIT for file %wZ",
+            &fileObject->FileName);
+      } else {
+        // We want to always dispatch non-root opens so we don't have to
+        // special-case anything here, but it needs a lot of testing.
+        DDbgPrint("  Here we only go in if some antivirus software tries to "
+                  "create files before startup is finished.\n");
+        if (fileObject->FileName.Length > 0) {
+          DDbgPrint("  Verify if the system tries to access System Volume\n");
+          if (StartsWith(&fileObject->FileName,
+                         &systemVolumeInformationFileName)) {
+            DDbgPrint("  It's an access to System Volume, so don't return "
+                      "SUCCESS. We don't have one.\n");
+            status = STATUS_NO_SUCH_FILE;
+            __leave;
+          }
+          // VMware App Volumes Agent would immediately issue an unmount request
+          // if we were to return a dummy handle for this file, and that would
+          // actually deadlock due to the unusual context it occurs in.
+          if (RtlEqualUnicodeString(&fileObject->FileName, &snapvolCfgFileName,
+                                    /*CaseInsensitive=*/TRUE)) {
+            DokanLogInfo(
+                &logger,
+                L"Failing open request for snapvol.cfg before IOCTL_EVENT_WAIT",
+                &fileObject->FileName);
+            status = STATUS_NO_SUCH_FILE;
+            __leave;
+          }
         }
+        DokanLogInfo(&logger,
+                     L"Handle created before IOCTL_EVENT_WAIT for file %wZ",
+                     &fileObject->FileName);
+        status = STATUS_SUCCESS;
+        __leave;
       }
-      DokanLogInfo(&logger,
-                   L"Handle created before IOCTL_EVENT_WAIT for file %wZ",
-                   &fileObject->FileName);
-      status = STATUS_SUCCESS;
-      __leave;
     }
 
     DDbgPrint("  IrpSp->Flags = %d\n", irpSp->Flags);

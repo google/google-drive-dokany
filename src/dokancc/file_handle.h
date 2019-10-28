@@ -27,6 +27,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <memory>
 #include <vector>
 
+#include "api.h"
 #include "file_info.h"
 
 namespace dokan {
@@ -38,16 +39,18 @@ namespace dokan {
 // the Create file system callback and destroy it in the Close callback. Note
 // that the "particular process" may be the kernel itself, i.e. the System
 // process, but a handle is not used by more than one process.
-class __declspec(dllexport) FileHandle {
+class FileHandle {
  public:
-  FileHandle(const std::wstring& path, ULONG process_id, bool directory);
+  DOKANCC_API FileHandle(const std::wstring& path,
+                         ULONG process_id,
+                         bool directory);
 
   // Force the destructor to exist in the DLL and not the caller's binary when
   // the DLL is being used; otherwise the implicit destruction of the member
   // strings might use a mismatched allocator and crash. While FileHandles are
   // not normally created or destroyed by the caller of the library, in a test
   // they can be.
-  ~FileHandle();
+  DOKANCC_API ~FileHandle();
 
   // Returns the path relative to the file system root, without any alternate
   // stream name.

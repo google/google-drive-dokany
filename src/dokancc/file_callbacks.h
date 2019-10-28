@@ -26,6 +26,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <vector>
 
+#include "api.h"
 #include "file_handle.h"
 #include "file_info.h"
 #include "util.h"
@@ -42,7 +43,7 @@ using FindFilesCallback =
 // A FileCallbacks object provides the user-mode implementation of file system
 // operations that target specific files. Each function must invoke the callback
 // that is its last parameter, when the work completes or fails.
-class __declspec(dllexport) FileCallbacks {
+class FileCallbacks {
  public:
   virtual ~FileCallbacks() {}
 
@@ -54,20 +55,20 @@ class __declspec(dllexport) FileCallbacks {
   // directory flag in the given handle indicates whether a directory should be
   // created. If an existing path is being opened, this function must set the
   // directory flag to the actual value.
-  virtual void Create(FileHandle* handle,
-                      ACCESS_MASK desired_access,
-                      uint32_t file_attributes,
-                      uint32_t share_access,
-                      uint32_t create_disposition,
-                      uint32_t create_options,
-                      const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Create(FileHandle* handle,
+                                  ACCESS_MASK desired_access,
+                                  uint32_t file_attributes,
+                                  uint32_t share_access,
+                                  uint32_t create_disposition,
+                                  uint32_t create_options,
+                                  const util::StatusCallback& callback) = 0;
 
   // Gets information about an open file. If this function succeeds, it should
   // set all the fields in the output struct before invoking the callback. If it
   // fails, the output struct is ignored.
-  virtual void GetInfo(const FileHandle* handle,
-                       FileInfo* output,
-                       const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void GetInfo(const FileHandle* handle,
+                                   FileInfo* output,
+                                   const util::StatusCallback& callback) = 0;
 
   // Reads length bytes starting at the given byte offset in the file. If the
   // range is partly or entirely beyond the end of the file, then the bytes
@@ -77,22 +78,22 @@ class __declspec(dllexport) FileCallbacks {
   // set to the number of bytes that were read. The status should be
   // STATUS_SUCCESS, unless there was a problem other than the requested range
   // starting or extending beyond the end of the file.
-  virtual void Read(const FileHandle* handle,
-                    int64_t offset,
-                    uint32_t length,
-                    uint32_t* actual_length_read,
-                    char* buffer,
-                    const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Read(const FileHandle* handle,
+                                int64_t offset,
+                                uint32_t length,
+                                uint32_t* actual_length_read,
+                                char* buffer,
+                                const util::StatusCallback& callback) = 0;
 
   // Writes length bytes from the given buffer to the given byte offset in the
   // file. If the offset is kEndOfFileWriteOffset, then the offset should be
   // ignored and the content should be written to the end of the file. The write
   // is expected to entirely succeed or fail.
-  virtual void Write(const FileHandle* handle,
-                     int64_t offset,
-                     uint32_t length,
-                     const char* buffer,
-                     const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Write(const FileHandle* handle,
+                                 int64_t offset,
+                                 uint32_t length,
+                                 const char* buffer,
+                                 const util::StatusCallback& callback) = 0;
 
   // Forces persistence of any modifications that have been made to the given
   // file (e.g. via the Write function). It should be possible to immediately
@@ -102,8 +103,8 @@ class __declspec(dllexport) FileCallbacks {
   // of an abrupt unmount. Flush can be invoked directly by apps (e.g. via
   // ::FlushFileBuffers), or by the kernel or other drivers (e.g. via
   // ::CcFlushCache).
-  virtual void Flush(const FileHandle* handle,
-                     const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Flush(const FileHandle* handle,
+                                 const util::StatusCallback& callback) = 0;
 
   // Lists all the files in the given directory. If this function succeeds, it
   // should call the output callback once with all the entries found. If it
@@ -111,20 +112,20 @@ class __declspec(dllexport) FileCallbacks {
   // conclude its work by calling the status callback. This function must
   // produce "." and ".." entries in output, or just ".", if the handle
   // represents the root directory.
-  virtual void FindFiles(const FileHandle* dir_handle,
-                         const FindFilesCallback& output,
-                         const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void FindFiles(const FileHandle* dir_handle,
+                                     const FindFilesCallback& output,
+                                     const util::StatusCallback& callback) = 0;
 
   // Adjusts the size of a non-directory file up or down. If this function
   // succeeds, then calls to GetInfo and FindFiles, after the callback reports
   // completion, should return this size.
-  virtual void ChangeSize(const FileHandle* handle,
-                          uint64_t size,
-                          const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void ChangeSize(const FileHandle* handle,
+                                      uint64_t size,
+                                      const util::StatusCallback& callback) = 0;
 
   // Changes a file's attributes and zero or more of its timestamps. This should
   // use FileTimes::is_set to determine which times need to be set.
-  virtual void ChangeAttributesAndTimes(
+  DOKANCC_API virtual void ChangeAttributesAndTimes(
       const FileHandle* handle,
       uint32_t attributes,
       const FileTimes& times,
@@ -142,8 +143,9 @@ class __declspec(dllexport) FileCallbacks {
   // the handle. Success of GetDeleteApproval does not guarantee that the flag
   // will be set when Cleanup is called, since the caller can later change its
   // mind and unset the flag.
-  virtual void GetDeleteApproval(const FileHandle* handle,
-                                 const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void GetDeleteApproval(
+      const FileHandle* handle,
+      const util::StatusCallback& callback) = 0;
 
   // Renames or moves a file or directory, given the new full path including the
   // name. If the replace_if_existing flag is false, and there is already a file
@@ -151,17 +153,17 @@ class __declspec(dllexport) FileCallbacks {
   // STATUS_OBJECT_NAME_COLLISION. For various incorrect error statuses, like
   // STATUS_OBJECT_NAME_EXISTS, ::MoveFile would return true to the calling app
   // despite the error.
-  virtual void Move(const FileHandle* handle,
-                    const std::wstring& new_full_path,
-                    bool replace_if_existing,
-                    const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Move(const FileHandle* handle,
+                                const std::wstring& new_full_path,
+                                bool replace_if_existing,
+                                const util::StatusCallback& callback) = 0;
 
   // Invoked when the last HANDLE to a file is being closed. This should delete
   // the file if it is marked for delete-on-close according to the handle. The
   // file may still be accessed by the kernel (e.g. to flush caches) after this
   // and before Close is called.
-  virtual void Cleanup(const FileHandle* handle,
-                       const util::StatusCallback& callback) = 0;
+  DOKANCC_API virtual void Cleanup(const FileHandle* handle,
+                                   const util::StatusCallback& callback) = 0;
 
   // Invoked if the kernel and dokan library reference count for a file both
   // drop to 0 while the file system is mounted, i.e. the FileHandle is not at
@@ -171,7 +173,7 @@ class __declspec(dllexport) FileCallbacks {
   // associated with the handle. On returning from this function, the handle
   // pointer becomes invalid. This function must succeed in cleaning up the
   // resources, so there is no result.
-  virtual void Close(FileHandle* handle) = 0;
+  DOKANCC_API virtual void Close(FileHandle* handle) = 0;
 };
 
 }  // namespace dokan

@@ -26,7 +26,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 /** Do not include NTSTATUS. Fix  duplicate preprocessor definitions */
 #define WIN32_NO_STATUS
 #include <windows.h>
+#include <winioctl.h>
 #undef WIN32_NO_STATUS
+
+#ifndef _WINTERNL_
+typedef LONG NTSTATUS;
+#endif
 #include <ntstatus.h>
 
 #include "fileinfo.h"
@@ -840,14 +845,14 @@ BOOL DOKANAPI DokanIsNameInExpression(LPCWSTR Expression, LPCWSTR Name,
  * The returned ULONG is the version number without the dots.
  * \return The version of Dokan
  */
-ULONG DOKANAPI DokanVersion();
+ULONG DOKANAPI DokanVersion(void);
 
 /**
  * \brief Get the version of the Dokan driver.
  * The returned ULONG is the version number without the dots.
  * \return The version of Dokan driver.
  */
-ULONG DOKANAPI DokanDriverVersion();
+ULONG DOKANAPI DokanDriverVersion(void);
 
 /**
  * \brief Extends the time out of the current IO operation in driver.

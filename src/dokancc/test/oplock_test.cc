@@ -21,6 +21,14 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 namespace dokan {
 namespace test {
+namespace {
+
+const auto kParams = testing::Values(
+    kCallbackSync,
+    kCallbackSync | kSuppressFileNameInEventContext,
+    kCallbackSync | kSuppressFileNameInEventContext | kAssumePagingIoIsLocked);
+
+}  // namespace
 
 class OplockTest : public FileSystemTestBase {
  public:
@@ -54,7 +62,7 @@ class OplockTest : public FileSystemTestBase {
       &oplock_overlapped_);
     DWORD error = GetLastError();
     if (error != ERROR_IO_PENDING) {
-      DOKAN_LOG_INFO(&logger_, "Oplock acquisition failed; error %u", error);
+      DOKAN_LOG_INFO(logger_, "Oplock acquisition failed; error %u", error);
     }
     file_handle_with_oplock_ = file_handle;
     return !result && error == ERROR_IO_PENDING;
@@ -116,7 +124,7 @@ class OplockTest : public FileSystemTestBase {
   REQUEST_OPLOCK_OUTPUT_BUFFER oplock_output_;
   OVERLAPPED oplock_overlapped_;
   DWORD bytes_returned_;
-  std::atomic<bool> oplock_broken_ = false;
+  std::atomic<bool> oplock_broken_{false};
   std::unique_ptr<std::thread> acknowledge_thread_;
 };
 
@@ -294,8 +302,7 @@ TEST_P(OplockTest, OpenRequiringOplockTimeout) {
   });
 }
 
-INSTANTIATE_TEST_CASE_P(OplockTests, OplockTest, testing::Values(
-    CallbackThreading::SYNC));
+INSTANTIATE_TEST_CASE_P(OplockTests, OplockTest, kParams);
 
 }  // namespace test
 }  // namespace dokan

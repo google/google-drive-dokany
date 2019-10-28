@@ -40,7 +40,6 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   BOOLEAN fcbLocked = FALSE;
 
   __try {
-
     DDbgPrint("==> DokanWrite\n");
 
     irpSp = IoGetCurrentIrpStackLocation(Irp);
@@ -71,6 +70,7 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       __leave;
     }
 
+    DOKAN_INIT_LOGGER(logger, vcb->DeviceObject->DriverObject, IRP_MJ_WRITE);
     DDbgPrint("  ProcessId %lu\n", IoGetRequestorProcessId(Irp));
     DokanPrintFileName(fileObject);
 
@@ -141,19 +141,10 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       __leave;
     }
 
-    // the length of EventContext is sum of length to write and length of file
-    // name
-    DokanFCBLockRO(fcb);
-    fcbLocked = TRUE;
-
     LARGE_INTEGER safeEventLength;
     safeEventLength.QuadPart =
-        sizeof(EVENT_CONTEXT) + irpSp->Parameters.Write.Length +
-        fcb->FileName.Length;
-    if (safeEventLength.HighPart != 0 ||
-        safeEventLength.QuadPart <
-            sizeof(EVENT_CONTEXT) + fcb->FileName.Length) {
-      DOKAN_INIT_LOGGER(logger, vcb->DeviceObject->DriverObject, IRP_MJ_WRITE);
+        sizeof(EVENT_CONTEXT) + irpSp->Parameters.Write.Length;
+    if (safeEventLength.HighPart != 0) {
       DokanLogError(&logger,
                     STATUS_INVALID_PARAMETER,
                     L"Write with unsupported total size: %I64u",
@@ -161,7 +152,21 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       status = STATUS_INVALID_PARAMETER;
       __leave;
     }
-
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      // The length of EventContext is sum of length to write and length of file
+      // name
+      DokanFCBLockRO(fcb);
+      fcbLocked = TRUE;
+      safeEventLength.QuadPart += fcb->FileName.Length;
+      if (safeEventLength.HighPart != 0) {
+        DokanLogError(&logger,
+                      STATUS_INVALID_PARAMETER,
+                      L"Write with unsupported total size: %I64u",
+                      safeEventLength.QuadPart);
+        status = STATUS_INVALID_PARAMETER;
+        __leave;
+      }
+    }
     eventLength = safeEventLength.LowPart;
     eventContext = AllocateEventContext(vcb->Dcb, Irp, eventLength, ccb);
 
@@ -220,17 +225,18 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     // the contents to write will be copyed to this offset
     eventContext->Operation.Write.BufferOffset =
         FIELD_OFFSET(EVENT_CONTEXT, Operation.Write.FileName[0]) +
-        fcb->FileName.Length + sizeof(WCHAR); // adds last null char
-
+        sizeof(WCHAR); // adds last null char, or the fixed single char.
+    if (!vcb->Dcb->SuppressFileNameInEventContext) {
+      eventContext->Operation.Write.BufferOffset += fcb->FileName.Length;
+      // copies file name
+      eventContext->Operation.Write.FileNameLength = fcb->FileName.Length;
+      RtlCopyMemory(eventContext->Operation.Write.FileName,
+                    fcb->FileName.Buffer, fcb->FileName.Length);
+    }
     // copies the content to write to EventContext
     RtlCopyMemory((PCHAR)eventContext +
                       eventContext->Operation.Write.BufferOffset,
                   buffer, irpSp->Parameters.Write.Length);
-
-    // copies file name
-    eventContext->Operation.Write.FileNameLength = fcb->FileName.Length;
-    RtlCopyMemory(eventContext->Operation.Write.FileName, fcb->FileName.Buffer,
-                  fcb->FileName.Length);
 
     // When eventlength is less than event notification buffer,
     // returns it to user-mode using pending event.
@@ -250,6 +256,10 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       //
       // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
       if (!FlagOn(Irp->Flags, IRP_PAGING_IO)) {
+        if (!fcbLocked) {
+          DokanFCBLockRO(fcb);
+          fcbLocked = TRUE;
+        }
         status = DokanCheckOplock(fcb, Irp, eventContext, DokanOplockComplete,
                                   DokanPrePostIrp);
 
@@ -307,6 +317,10 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       //
       // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
       if (!FlagOn(Irp->Flags, IRP_PAGING_IO)) {
+        if (!fcbLocked) {
+          DokanFCBLockRO(fcb);
+          fcbLocked = TRUE;
+        }
         status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), Irp, requestContext,
                                   DokanOplockComplete, DokanPrePostIrp);
 

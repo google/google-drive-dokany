@@ -31,6 +31,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <string>
 #include <unordered_set>
 
+#include "api.h"
 #include "change_handler.h"
 #include "device.h"
 #include "driver_log_subscriber.h"
@@ -64,20 +65,20 @@ enum MountResult {
 // uses a FileCallbacks object and a VolumeCallbacks object to implement the
 // file system operations, and it provides an API to control the kernel-mode
 // driver.
-class __declspec(dllexport) FileSystem {
+class FileSystem {
  public:
   // The maximum amount of data a read can actually transfer at once. We are
   // limited to less than uint32 max because the buffer gets wrapped in a
   // DeviceIoControl payload that itself is limited to uint32 max. Currently we
   // fail reads bigger than this size. Writes over this size are problematic at
   // the driver level and don't make it to the DLL.
-  static const ULONG kMaxReadSize;
+  DOKANCC_API static const ULONG kMaxReadSize;
 
   // Creates a FileSystem that is completely inactive and not mounted until its
   // Mount method is invoked. The caller retains ownership of the callbacks and
   // logger, which must outlive this FileSystem.
-  FileSystem(FileCallbacks* file_callbacks, VolumeCallbacks* volume_callbacks,
-             Logger* logger);
+  DOKANCC_API FileSystem(FileCallbacks* file_callbacks,
+                         VolumeCallbacks* volume_callbacks, Logger* logger);
 
   FileSystem(const FileSystem&) = delete;
   FileSystem& operator=(const FileSystem&) = delete;
@@ -85,14 +86,14 @@ class __declspec(dllexport) FileSystem {
   // Asserts that the file system has been unmounted. It should not be destroyed
   // until the Unmounted callback has returned. It is then safe to destroy it on
   // the I/O thread.
-  ~FileSystem();
+  DOKANCC_API ~FileSystem();
 
   // Mounts the file system, leaving it in a suspended state where virtually any
   // I/O sent to it will block (except for requests that can be answered
   // directly by the driver). Its owner must then execute a ReceiveIo/DispatchIo
   // loop to process I/O. A FileSystem object can only be mounted once.
-  MountResult Mount(const std::wstring& requested_mount_point,
-                    const StartupOptions& startup_options);
+  DOKANCC_API MountResult Mount(const std::wstring& requested_mount_point,
+                                const StartupOptions& startup_options);
 
   const StartupOptions& startup_options() const {
     return startup_options_;
@@ -126,8 +127,8 @@ class __declspec(dllexport) FileSystem {
   // system is the only source of work for the loop, the wait shown above is
   // still required, since neither ReceiveIo nor DispatchIo will block waiting
   // for the I/O request to come in.
-  bool ReceiveIo();
-  void DispatchIo();
+  DOKANCC_API bool ReceiveIo();
+  DOKANCC_API void DispatchIo();
   HANDLE wait_handle() const {
     return overlapped_.hEvent;
   }
@@ -140,7 +141,7 @@ class __declspec(dllexport) FileSystem {
   // call that returns false (if there are no pending callbacks), or when the
   // last pending callback completes. After the Unmounted callback returns, it
   // is safe to destroy this FileSystem object on the I/O thread.
-  void Unmount();
+  DOKANCC_API void Unmount();
 
   // Waits until the file system's I/O loop gets out of the primordial stage
   // where the driver fakes success for CreateFile calls. See
@@ -148,12 +149,12 @@ class __declspec(dllexport) FileSystem {
   // that we can't remove that state, since it's hard to prove otherwise. If
   // the file system is unmounted before becoming safe to access, this function
   // unblocks and returns false.
-  bool WaitUntilSafeToAccess();
+  DOKANCC_API bool WaitUntilSafeToAccess();
 
   // Waits until automatic post-start work is done. This is generally only
   // useful for establishing noise-free conditions in tests. A normal consumer
   // of FileSystem does not need to care when this is done.
-  void WaitUntilPostStartDone();
+  DOKANCC_API void WaitUntilPostStartDone();
 
   // Returns the handler that the FileSystem's owner can use to send
   // notifications when files change via a side channel (i.e. not via the
@@ -162,7 +163,7 @@ class __declspec(dllexport) FileSystem {
     return notification_handler_.get();
   }
 
-  void AssertNotCalledOnIoThread() const;
+  DOKANCC_API void AssertNotCalledOnIoThread() const;
 
  private:
   // Sends a broadcast message that causes, for example, existing Explorer
@@ -296,16 +297,16 @@ class __declspec(dllexport) FileSystem {
   std::wstring mount_point_;
   ULONG driver_mount_id_ = 0;
   DWORD io_thread_id_ = 0;
-  std::atomic<bool> mounted_ = false;
+  std::atomic<bool> mounted_{false};
   std::unique_ptr<ChangeHandler> change_handler_;
   std::unique_ptr<FileInfoHandler> file_info_handler_;
   std::unique_ptr<VolumeInfoHandler> volume_info_handler_;
   std::unique_ptr<FindHandler> find_handler_;
 
   // These are usable on any thread.
-  std::atomic<bool> unmount_requested_ = false;
-  std::atomic<bool> safe_to_access_ = false;
-  std::atomic<bool> post_start_done_ = false;
+  std::atomic<bool> unmount_requested_{false};
+  std::atomic<bool> safe_to_access_{false};
+  std::atomic<bool> post_start_done_{false};
   HANDLE keepalive_handle_ = INVALID_HANDLE_VALUE;
   std::unique_ptr<NotificationHandler> notification_handler_;
 
@@ -314,6 +315,7 @@ class __declspec(dllexport) FileSystem {
   std::unique_ptr<std::thread> post_start_thread_;
   std::unique_ptr<ReplyHandler> reply_handler_;
   bool io_stopped_ = false;
+  size_t dispatch_failure_count_ = 0;
   Device global_device_;
   Device device_;
   OVERLAPPED overlapped_;

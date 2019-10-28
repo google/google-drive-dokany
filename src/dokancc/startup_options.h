@@ -60,6 +60,15 @@ enum StartupFlags {
   // Whether the driver should log oplock requests. This may be detrimental to
   // preformance and should not be enabled in normal use.
   DOKAN_OPTION_LOG_OPLOCKS = 16384,
+
+  // Suppress the copying of file names from the kernel to dokancc in requests
+  // where dokancc does not use them. This should be the default behavior, but
+  // historically was not an option.
+  DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT = 32768,
+
+  // Don't lock the FCB in the driver for paging I/O IRPs where it is not
+  // already bypassed by the above flag.
+  DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED = 65536
 };
 
 // The options for mounting a FileSystem.
