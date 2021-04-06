@@ -32,6 +32,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 namespace dokan {
 
+inline void ValidateSharingFlags(DWORD flags) {
+  static const DWORD kAllSharingFlags =
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+  assert((flags & ~kAllSharingFlags) == 0);
+}
+
 // A FileHandle represents an open file within a particular process, with some
 // state owned by the dokan library and some state (wrapped in a context object)
 // that is owned by the library's consumer. The lifetime of a handle is managed
@@ -41,8 +47,8 @@ namespace dokan {
 // process, but a handle is not used by more than one process.
 class FileHandle {
  public:
-  DOKANCC_API FileHandle(const std::wstring& path,
-                         ULONG process_id,
+  DOKANCC_API FileHandle(const std::wstring& path, ULONG process_id,
+                         DWORD desired_access, DWORD share_access,
                          bool directory);
 
   // Force the destructor to exist in the DLL and not the caller's binary when
@@ -77,6 +83,21 @@ class FileHandle {
   // Returns the ID of the process that owns the handle.
   ULONG process_id() const {
     return process_id_;
+  }
+
+  // Returns true if the handle was opened with only read access.
+  bool has_readonly_desired_access() const {
+    static const DWORD kReadMask = STANDARD_RIGHTS_READ | FILE_READ_DATA |
+                                   FILE_READ_ATTRIBUTES | FILE_READ_EA |
+                                   SYNCHRONIZE;
+    return (desired_access_ & ~kReadMask) == 0;
+  }
+
+  // Returns true if the handle was opened granting the given FILE_SHARE_XXX
+  // permissions.
+  bool allows_sharing(DWORD flags) const {
+    ValidateSharingFlags(flags);
+    return (share_access_ & flags) == flags;
   }
 
   // Used by the app that owns the file system to associate an arbitrary object
@@ -179,6 +200,8 @@ class FileHandle {
   std::wstring path_;
   std::wstring alternate_stream_name_;
   const ULONG process_id_;
+  const DWORD desired_access_;
+  const DWORD share_access_;
   bool directory_;
   bool use_readonly_security_descriptor_ = false;
   void* context_ = nullptr;

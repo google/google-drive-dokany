@@ -35,7 +35,7 @@ namespace dokan {
 
 class FileSystem;
 
-constexpr int32_t kEndOfFileWriteOffset = -1;
+inline constexpr int32_t kEndOfFileWriteOffset = -1;
 
 using FindFilesCallback =
       std::function<void(const std::vector<FileNameAndInfo>&)>;

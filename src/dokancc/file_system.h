@@ -44,6 +44,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "notification_handler.h"
 #include "public.h"
 #include "reply_handler.h"
+#include "reply_monitor.h"
 #include "startup_options.h"
 #include "volume_callbacks.h"
 #include "volume_info_handler.h"
@@ -165,6 +166,15 @@ class FileSystem {
 
   DOKANCC_API void AssertNotCalledOnIoThread() const;
 
+  DOKANCC_API ReplyMonitor* reply_monitor() {
+    return reply_handler_.get();
+  }
+
+  // Fetches the volume metrics from the driver. These metrics are cumulative
+  // for this FileSystem object since it was mounted. Returns whether the
+  // retrieval succeeded; if not, the reason is logged.
+  DOKANCC_API bool GetVolumeMetrics(VOLUME_METRICS* output);
+
  private:
   // Sends a broadcast message that causes, for example, existing Explorer
   // windows to react to the drive being mounted or unmounted. Otherwise,
@@ -183,6 +193,12 @@ class FileSystem {
   // Converts the given IRP function code from the Windows Driver Kit to the
   // pointer to the corresponding dispatch function in this class.
   static DispatchFn GetDispatchFn(ULONG major_irp_function);
+
+  // Invokes the appropriate dispatch function with a copy of the given request.
+  // The copy gets retained in |pending_requests_| until RequestCompleted is
+  // called as a (typically asynchronous) result of dispatching.
+  // |original_request| is only expected to be valid until the function returns.
+  void DispatchRequest(const EVENT_CONTEXT* original_request);
 
   void DispatchCreate(EVENT_CONTEXT* request);
   void CompleteCreate(EVENT_CONTEXT* request, FileHandle* handle,
@@ -243,6 +259,7 @@ class FileSystem {
                        NTSTATUS status);
 
   void DispatchClose(EVENT_CONTEXT* request);
+  void DispatchDriverLogs(EVENT_CONTEXT* request);
 
   // Helper for CompleteXXX functions that have a variable-sized reply. This
   // replies to the driver and cleans up the request. provided_var_buffer_size
@@ -297,6 +314,8 @@ class FileSystem {
   std::wstring mount_point_;
   ULONG driver_mount_id_ = 0;
   DWORD io_thread_id_ = 0;
+  bool allow_request_batching_ = false;
+  bool use_fsctl_events_ = false;
   std::atomic<bool> mounted_{false};
   std::unique_ptr<ChangeHandler> change_handler_;
   std::unique_ptr<FileInfoHandler> file_info_handler_;

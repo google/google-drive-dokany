@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros">
+    <DOKAN_PACKAGE_VERSION>${FILE_VERSION}</DOKAN_PACKAGE_VERSION>
+    <DOKAN_MAJOR_API_VERSION_NUM>${BUILD_LABEL}</DOKAN_MAJOR_API_VERSION_NUM>
+    <DOKAN_MAJOR_API_VERSION>L"$(DOKAN_MAJOR_API_VERSION_NUM)"</DOKAN_MAJOR_API_VERSION>
+    <DOKAN_DRIVER_NAME>${DRIVER_NAME}</DOKAN_DRIVER_NAME>
+    <DOKAN_DRIVER_NAME_STR>"$(DRIVER_NAME)"</DOKAN_DRIVER_NAME_STR>
+    <DOKAN_DEVICE_PREFIX_NAME>L"GoogleDriveFS"</DOKAN_DEVICE_PREFIX_NAME>
+    <DOKAN_DRIVER_VERSION>${DRIVER_VERSION}</DOKAN_DRIVER_VERSION>
+    <DOKAN_DIRECTORY_MOUNTING_BASE_GUID>${DIRECTORY_MOUNTING_BASE_GUID}</DOKAN_DIRECTORY_MOUNTING_BASE_GUID>
+    <VOLUME_LABEL>L"GOOGLEDRIVEFS"</VOLUME_LABEL>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemDefinitionGroup />
+  <ItemGroup>
+    <BuildMacro Include="DOKAN_PACKAGE_VERSION">
+      <Value>$(DOKAN_PACKAGE_VERSION)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_MAJOR_API_VERSION">
+      <Value>$(DOKAN_MAJOR_API_VERSION)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_DRIVER_NAME">
+      <Value>$(DOKAN_DRIVER_NAME)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_DRIVER_NAME_STR">
+      <Value>$(DOKAN_DRIVER_NAME_STR)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_DEVICE_PREFIX_NAME">
+      <Value>$(DOKAN_DEVICE_PREFIX_NAME)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_DRIVER_VERSION">
+      <Value>$(DOKAN_DRIVER_VERSION)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DOKAN_DIRECTORY_MOUNTING_BASE_GUID">
+      <Value>$(DOKAN_DIRECTORY_MOUNTING_BASE_GUID)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="VOLUME_LABEL">
+      <Value>$(VOLUME_LABEL)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+  </ItemGroup>
+</Project>

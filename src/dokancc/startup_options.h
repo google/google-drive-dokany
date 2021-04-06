@@ -46,17 +46,6 @@ enum StartupFlags {
   // detrimental to performance and should not be enabled in normal use.
   DOKAN_OPTION_LOCK_DEBUG_ENABLED = 512,
 
-  // Enable oplock support. Without this flag, all oplock requests receive
-  // STATUS_NOT_SUPPORTED.
-  DOKAN_OPTION_ENABLE_OPLOCKS = 4096,
-
-  // Whether to satisfy single-entry, name-only directory searches directly in
-  // the driver by copying the normalized name from an open FCB. These searches
-  // are frequently done on Windows 7, because the built-in fileinfo.sys filter
-  // driver tends to normalize paths synchronously in post-CreateFile using
-  // logic that requires a directory search for each path component.
-  DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH = 8192,
-
   // Whether the driver should log oplock requests. This may be detrimental to
   // preformance and should not be enabled in normal use.
   DOKAN_OPTION_LOG_OPLOCKS = 16384,
@@ -68,7 +57,21 @@ enum StartupFlags {
 
   // Don't lock the FCB in the driver for paging I/O IRPs where it is not
   // already bypassed by the above flag.
-  DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED = 65536
+  DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED = 65536,
+
+  // Allow more than one request to be passed per kernel-to-user message.
+  DOKAN_OPTION_ALLOW_REQUEST_BATCHING = 131072,
+
+  // Allow more than one request and reply to be passed per kernel-to-user
+  // message. This implies DOKAN_OPTION_ALLOW_REQUEST_BATCHING and it's
+  // irrelevant whether that is also set.
+  DOKAN_OPTION_ALLOW_FULL_BATCHING = 262144,
+
+  // Forward the kernel driver global and volume logs to the userland.
+  DOKAN_OPTION_DISPATCH_DRIVER_LOGS = 524288,
+
+  // Send Event of type FILE_DEVICE_FILE_SYSTEM instead of FILE_DEVICE_UNKNOWN.
+  DOKAN_OPTION_USE_FSCTL_EVENTS = 1048576
 };
 
 // The options for mounting a FileSystem.
@@ -133,6 +136,12 @@ struct StartupOptions {
   // FileHandle::set_use_readonly_security_descriptor. The purpose is to prevent
   // Explorer from offering e.g. New options that don't make sense.
   PSECURITY_DESCRIPTOR readonly_security_descriptor = nullptr;
+
+  // Keep FCBs alive for this amount of time after they are no longer referenced
+  // by an open file or memory mapped region. This essentially allows the
+  // teardown of virus scanner state to be canceled if the file is soon used
+  // again, which can exponentially speed up use cases like zip extraction.
+  ULONG fcb_garbage_collection_interval_ms = 0;
 };
 
 }  // namespace dokan

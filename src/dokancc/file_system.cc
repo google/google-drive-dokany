@@ -1,11 +1,14 @@
 #include "file_system.h"
 
-#include <dbt.h>
 #include <ShlObj.h>
+#include <dbt.h>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <thread>
 
+#include "hex_util.h"
 #include "util.h"
 
 namespace dokan {
@@ -25,7 +28,7 @@ bool IsNormalCreateResult(NTSTATUS status, ULONG disposition) {
 }
 
 bool IsDriveLetterInUse(wchar_t letter) {
-  return (GetLogicalDrives() & (1 << (toupper(letter) - 'A'))) != 0;
+  return (GetLogicalDrives() & (1 << (std::toupper(letter) - 'A'))) != 0;
 }
 
 bool PrepareMountRequest(const std::wstring& requested_mount_point,
@@ -35,20 +38,26 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   assert(!requested_mount_point.empty());
   memset(mount_request, 0, sizeof(EVENT_START));
   mount_request->UserVersion = DOKAN_DRIVER_VERSION;
-  // This needs to change with every version, or a rapid upgrade can race
-  // against the delayed removal of the prior device by DeleteDeviceDelayed.
-  // While that is pending, there can be a period of up to 60 sec where a
-  // new driver binary would fail to mount with the same GUID as the old binary.
-  // The other reason to change it is that if the driver's Mount Manager
-  // interaction logic changes, using the same GUID would leave it susceptible
-  // to unexpected behavior due to stale information associated with the GUID in
-  // the registry by the Mount Manager.
-  mount_request->BaseVolumeGuid = DOKAN_DRIVER_VERSION;
+  // The BaseVolumeGuid needs to change with every version, or a rapid upgrade
+  // can race against the delayed removal of the prior device by
+  // DeleteDeviceDelayed. While that is pending, there can be a period of up to
+  // 60 sec where a new driver binary would fail to mount with the same GUID as
+  // the old binary. The other reason to change it is that if the driver's Mount
+  // Manager interaction logic changes, using the same GUID would leave it
+  // susceptible to unexpected behavior due to stale information associated with
+  // the GUID in the registry by the Mount Manager.
+  if (util::IsMountPointDriveLetter(requested_mount_point)) {
+    mount_request->BaseVolumeGuid = DOKAN_DRIVER_VERSION;
+    if (IsDriveLetterInUse(requested_mount_point[0])) {
+      mount_request->Flags |= DOKAN_EVENT_DRIVE_LETTER_IN_USE;
+    }
+  } else {
+    // We use a different GUID for mount folder path for avoiding conflict in
+    // mount manager database for the time this feature is experimental.
+    mount_request->BaseVolumeGuid = DOKAN_DIRECTORY_MOUNTING_BASE_GUID;
+  }
   mount_request->Flags = DOKAN_EVENT_MOUNT_MANAGER |
                          DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS;
-  if (IsDriveLetterInUse(requested_mount_point[0])) {
-    mount_request->Flags |= DOKAN_EVENT_DRIVE_LETTER_IN_USE;
-  }
   if (options.flags & DOKAN_OPTION_ALT_STREAM) {
     mount_request->Flags |= DOKAN_EVENT_ALTERNATIVE_STREAM_ON;
   }
@@ -64,14 +73,8 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   if (options.flags & DOKAN_OPTION_LOCK_DEBUG_ENABLED) {
     mount_request->Flags |= DOKAN_EVENT_LOCK_DEBUG_ENABLED;
   }
-  if (options.flags & DOKAN_OPTION_ENABLE_OPLOCKS) {
-    mount_request->Flags |= DOKAN_EVENT_ENABLE_OPLOCKS;
-  }
   if (options.flags & DOKAN_OPTION_LOG_OPLOCKS) {
     mount_request->Flags |= DOKAN_EVENT_LOG_OPLOCKS;
-  }
-  if (options.flags & DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH) {
-    mount_request->Flags |= DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH;
   }
   if (options.flags & DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT) {
     mount_request->Flags |= DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT;
@@ -79,6 +82,16 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   if (options.flags & DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED) {
     mount_request->Flags |= DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED;
   }
+  if (options.flags & DOKAN_OPTION_ALLOW_REQUEST_BATCHING
+     || options.flags & DOKAN_OPTION_ALLOW_FULL_BATCHING) {
+    mount_request->Flags |= DOKAN_EVENT_ALLOW_IPC_BATCHING;
+  }
+#ifdef NEXT_DOKANCC_RELEASE
+  if (options.flags & DOKAN_OPTION_DISPATCH_DRIVER_LOGS) {
+    mount_request->Flags |= DOKAN_EVENT_DISPATCH_DRIVER_LOGS;
+  }
+#endif
+
   memcpy_s(mount_request->MountPoint, sizeof(mount_request->MountPoint),
            requested_mount_point.c_str(),
            requested_mount_point.size() * sizeof(wchar_t));
@@ -87,16 +100,18 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
       options.volume_security_descriptor_length;
   if (mount_request->VolumeSecurityDescriptorLength >
       VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE) {
-    DOKAN_LOG_ERROR(logger, "Volume security descriptor is too large."
-                     " Actual: %u, supported: %u",
-                     mount_request->VolumeSecurityDescriptorLength,
-                     VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE);
+    DOKAN_LOG(ERROR(logger))
+        << "Volume security descriptor is too large. Actual: "
+        << mount_request->VolumeSecurityDescriptorLength
+        << ", supported: " << VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE;
     return false;
   } else if (mount_request->VolumeSecurityDescriptorLength != 0) {
     memcpy(mount_request->VolumeSecurityDescriptor,
            options.volume_security_descriptor,
            mount_request->VolumeSecurityDescriptorLength);
   }
+  mount_request->FcbGarbageCollectionIntervalMs =
+      options.fcb_garbage_collection_interval_ms;
   return true;
 }
 
@@ -160,7 +175,6 @@ FileSystem::FileSystem(FileCallbacks* file_callbacks,
         volume_callbacks_(volume_callbacks),
         logger_(logger),
         driver_log_subscriber_(logger),
-        io_buffer_(EVENT_CONTEXT_MAX_SIZE),
         global_device_(logger),
         device_(logger) {
   memset(&overlapped_, 0, sizeof(OVERLAPPED));
@@ -168,7 +182,7 @@ FileSystem::FileSystem(FileCallbacks* file_callbacks,
       nullptr, true, false, nullptr);
   notification_handler_ = CreateNotificationHandler(this, logger);
   if (!driver_log_subscriber_.Start()) {
-    DOKAN_LOG_ERROR(logger_, "Not capturing driver log messages.");
+    DOKAN_LOG_(ERROR) << "Not capturing driver log messages.";
   }
 }
 
@@ -176,6 +190,16 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
                               const StartupOptions& startup_options) {
   assert(!mounted_);
   startup_options_ = startup_options;
+  const bool allow_full_batching = startup_options_.flags
+      & DOKAN_OPTION_ALLOW_FULL_BATCHING;
+  allow_request_batching_ = allow_full_batching
+      || (startup_options_.flags & DOKAN_OPTION_ALLOW_REQUEST_BATCHING);
+  io_buffer_.resize(EVENT_CONTEXT_MAX_SIZE * (allow_request_batching_ ? 4 : 1));
+  use_fsctl_events_ = startup_options_.flags & DOKAN_OPTION_USE_FSCTL_EVENTS;
+  if (use_fsctl_events_) {
+    global_device_.SetDesiredAccess(0);
+    device_.SetDesiredAccess(0);
+  }
   io_thread_id_ = GetCurrentThreadId();
   change_handler_.reset(new ChangeHandler(file_callbacks_, logger_));
   file_info_handler_.reset(
@@ -184,67 +208,79 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
       new VolumeInfoHandler(volume_callbacks_, logger_, &startup_options_));
   find_handler_.reset(
       new FindHandler(file_callbacks_, logger_, file_info_handler_.get()));
-  DOKAN_LOG_INFO(logger_, "Mounting file system with requested mount point: %S",
-                 requested_mount_point.c_str());
-  if (!global_device_.Open(DOKAN_GLOBAL_DEVICE_NAME)) {
+  DOKAN_LOG_(INFO) << "Mounting file system with requested mount point: "
+                   << requested_mount_point;
+  if (!global_device_.OpenGlobalDevice()) {
     return MountResult::FAILED_TO_OPEN_GLOBAL_DEVICE;
   }
-  DOKAN_LOG_INFO(logger_, "Opened global dokan device: %S",
-                 DOKAN_GLOBAL_DEVICE_NAME);
   EVENT_START mount_request = {0};
   if (!PrepareMountRequest(requested_mount_point, startup_options_, logger_,
                            &mount_request)) {
-    DOKAN_LOG_ERROR(logger_, "Failed to prepare mount request.");
+    DOKAN_LOG_(ERROR) << "Failed to prepare mount request.";
     return MountResult::FAILED_TO_PREPARE_MOUNT_REQUEST;
   }
   EVENT_DRIVER_INFO mount_response = {0};
-  bool request_sent = global_device_.Control(
-      IOCTL_EVENT_START, mount_request, &mount_response);
+  ULONG ioctl = IOCTL_EVENT_START;
+#ifdef NEXT_DOKANCC_RELEASE
+  ioctl = use_fsctl_events_ ? FSCTL_EVENT_START : IOCTL_EVENT_START;
+#endif
+  bool request_sent = global_device_.Control(ioctl, mount_request, &mount_response);
+  if (!request_sent || mount_response.Status != DOKAN_MOUNTED) {
+    // Give the driver log subscriber time to get events back related to the
+    // failure. There isn't a good way to guarantee delivery of everything that
+    // occurred up until now; even the "pull" API for the Event Log actually has
+    // an async disconnect with the backend.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
   if (!request_sent) {
-    DOKAN_LOG_ERROR(logger_, "Failed to issue mount request.");
+    DOKAN_LOG_(ERROR) << "Failed to issue mount request.";
     return MountResult::FAILED_TO_ISSUE_MOUNT_REQUEST;
   }
+  if (mount_response.Status == DOKAN_START_FAILED) {
+    if (!util::CheckDriverVersion(mount_response.DriverVersion, logger_)) {
+      return MountResult::DRIVER_VERSION_MISMATCH;
+    }
+    DOKAN_LOG_(ERROR) << "Generic mount error returned from driver.";
+    return MountResult::GENERIC_FAILURE;
+  }
+  if (mount_response.Status != DOKAN_MOUNTED) {
+    DOKAN_LOG_(ERROR) << "Unrecognized result from driver; assuming failure: "
+                      << Hex(mount_response.Status);
+    return MountResult::UNRECOGNIZED_DRIVER_MOUNT_RESPONSE;
+  }
+
   device_name_ = mount_response.DeviceName;
   driver_mount_id_ = mount_response.MountId;
   const std::wstring raw_device_name = L"\\\\." + device_name_;
   if (!device_.Open(raw_device_name)) {
     return MountResult::FAILED_TO_OPEN_MOUNTED_DEVICE;
   }
-
-  if (mount_response.Status == DOKAN_MOUNTED) {
+  if (util::IsMountPointDriveLetter(requested_mount_point)) {
     mount_point_ = L"";
     mount_point_ += mount_response.ActualDriveLetter;
     mount_point_ += L':';
-    DOKAN_LOG_INFO(logger_, "Successfully mounted device name: %S"
-                   " with mount point: %S",
-                   mount_response.DeviceName,
-                   mount_point_.c_str());
-    mounted_ = true;
-    volume_callbacks_->Mounted(this);
-    DOKAN_LOG_INFO(logger_, "Mounted callback returned.");
-    reply_handler_.reset(new ReplyHandler(&device_, logger_,
-                                          startup_options_.reply_thread_count));
-    post_start_thread_.reset(new std::thread([this] {
-      PostStart();
-    }));
-    return MountResult::SUCCESS;
+  } else {
+    mount_point_ = requested_mount_point;
   }
-
-  // In any case below here, we are going to cancel.
-  if (mount_response.Status == DOKAN_START_FAILED) {
-    if (!util::CheckDriverVersion(mount_response.DriverVersion, logger_)) {
-      return MountResult::DRIVER_VERSION_MISMATCH;
-    }
-    DOKAN_LOG_ERROR(logger_, "Generic mount error returned from driver.");
-    return MountResult::GENERIC_FAILURE;
-  }
-  DOKAN_LOG_ERROR(logger_,
-                  "Unrecognized result from driver; assuming failure: %x",
-                  mount_response.Status);
-  return MountResult::UNRECOGNIZED_DRIVER_MOUNT_RESPONSE;
+  DOKAN_LOG_(INFO) << "Successfully mounted device name: "
+                   << mount_response.DeviceName
+                   << " with mount point: " << mount_point_;
+  mounted_ = true;
+  reply_handler_.reset(new ReplyHandler(&device_, logger_,
+                                        startup_options_.reply_thread_count,
+                                        allow_full_batching, use_fsctl_events_));
+  volume_callbacks_->Mounted(this);
+  DOKAN_LOG_(INFO) << "Mounted callback returned.";
+  post_start_thread_.reset(new std::thread([this] {
+    PostStart();
+  }));
+  return MountResult::SUCCESS;
 }
 
 void FileSystem::BroadcastExistenceToApps(bool exists) {
+  if (!util::IsMountPointDriveLetter(mount_point_)) {
+    return;
+  }
   // We make user32 calls in here, which are deadlock-prone when done from the
   // critical path of a file system.
   if (exists) {
@@ -259,15 +295,15 @@ void FileSystem::BroadcastExistenceToApps(bool exists) {
   memset(&params, 0, sizeof(params));
   params.dbcv_size = sizeof(params);
   params.dbcv_devicetype = DBT_DEVTYP_VOLUME;
-  params.dbcv_unitmask = (1 << (toupper(mount_point_[0]) - 'A'));
+  params.dbcv_unitmask = (1 << (std::toupper(mount_point_[0]) - 'A'));
   DWORD receipients = BSM_APPLICATIONS;
   DWORD device_event = exists ? DBT_DEVICEARRIVAL : DBT_DEVICEREMOVECOMPLETE;
   long result = BroadcastSystemMessage(
       BSF_NOHANG | BSF_FORCEIFHUNG | BSF_NOTIMEOUTIFNOTHUNG, &receipients,
       WM_DEVICECHANGE, device_event, reinterpret_cast<LPARAM>(&params));
   if (result <= 0) {
-    DOKAN_LOG_ERROR(logger_, "Failed to broadcast drive existence: %u",
-                    GetLastError());
+    DOKAN_LOG_(ERROR) << "Failed to broadcast drive existence: "
+                      << GetLastError();
   }
   SHChangeNotify(exists ? SHCNE_DRIVEADD : SHCNE_DRIVEREMOVED, SHCNF_PATH,
                  mount_point_.c_str(), nullptr);
@@ -280,8 +316,7 @@ void FileSystem::BroadcastExistenceToApps(bool exists) {
     HRESULT result = SHGetKnownFolderIDList(FOLDERID_ComputerFolder, 0, nullptr,
                                             &computer_root);
     if (result != S_OK) {
-      DOKAN_LOG_INFO(
-          logger_, "Failed to get root PIDL for unmount notification.");
+      DOKAN_LOG_(INFO) << "Failed to get root PIDL for unmount notification.";
       return;
     }
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_IDLIST, computer_root, nullptr);
@@ -306,15 +341,28 @@ void FileSystem::AssertNotCalledOnIoThread() const {
   assert(GetCurrentThreadId() != io_thread_id_);
 }
 
+bool FileSystem::GetVolumeMetrics(VOLUME_METRICS* output) {
+  ULONG ioctl = IOCTL_GET_VOLUME_METRICS;
+#ifdef NEXT_DOKANCC_RELEASE
+  ioctl =
+      use_fsctl_events_ ? FSCTL_GET_VOLUME_METRICS : IOCTL_GET_VOLUME_METRICS;
+#endif
+  return device_.ControlWithOutputOnly(ioctl, output);
+}
+
 void FileSystem::Unmount() {
   if (!mounted_ || unmount_requested_.exchange(true)) {
     return;
   }
-  DOKAN_LOG_INFO(logger_, "Unmounting the file system.");
-  if (device_.Control(IOCTL_EVENT_RELEASE)) {
-    DOKAN_LOG_INFO(logger_, "Sent unmount request to driver.");
+  DOKAN_LOG_(INFO) << "Unmounting the file system.";
+  ULONG ioctl = IOCTL_EVENT_RELEASE;
+#ifdef NEXT_DOKANCC_RELEASE
+  ioctl = use_fsctl_events_ ? FSCTL_EVENT_RELEASE : IOCTL_EVENT_RELEASE;
+#endif
+  if (device_.Control(ioctl)) {
+    DOKAN_LOG_(INFO) << "Sent unmount request to driver.";
   } else {
-    DOKAN_LOG_INFO(logger_, "Failed to send unmount request to driver.");
+    DOKAN_LOG_(INFO) << "Failed to send unmount request to driver.";
   }
 }
 
@@ -324,9 +372,9 @@ void FileSystem::MaybeFinishUnmount() {
     post_start_thread_->join();
     reply_handler_->Shutdown();
     BroadcastExistenceToApps(false);
-    DOKAN_LOG_INFO(logger_, "There are no more pending I/O requests.");
+    DOKAN_LOG_(INFO) << "There are no more pending I/O requests.";
     volume_callbacks_->Unmounted();
-    DOKAN_LOG_INFO(logger_, "Unmounted callback completed.");
+    DOKAN_LOG_(INFO) << "Unmounted callback completed.";
   }
 }
 
@@ -341,28 +389,26 @@ void FileSystem::PostStart() {
   if (keepalive_handle_ == INVALID_HANDLE_VALUE) {
     // We don't consider this a fatal error because the keepalive handle is only
     // needed for abnormal termination cases anyway.
-    DOKAN_LOG_ERROR(logger_, "Failed to open keepalive file: %S",
-                    keepalive_path.c_str());
+    DOKAN_LOG_(ERROR) << "Failed to open keepalive file: " << keepalive_path;
   } else {
     DWORD keepalive_bytes_returned = 0;
     BOOL keepalive_active = device_.Control(keepalive_handle_,
                                             FSCTL_ACTIVATE_KEEPALIVE);
     if (!keepalive_active) {
-      DOKAN_LOG_ERROR(logger_, "Failed to activate keepalive handle.");
+      DOKAN_LOG_(ERROR) << "Failed to activate keepalive handle.";
     }
   }
 
   BroadcastExistenceToApps(true);
-  DOKAN_LOG_INFO(logger_, "PostStart completed.");
+  DOKAN_LOG_(INFO) << "PostStart completed.";
   util::SetAndNotify(&mutex_, &state_, &post_start_done_);
 }
 
 bool FileSystem::ReceiveIo() {
   AssertCalledOnIoThread();
   if (dispatch_failure_count_ > kMaxDispatchFailureCount) {
-    DOKAN_LOG_INFO(
-        logger_,
-        "Stopping I/O loop due to too many consecutive dispatch errors.");
+    DOKAN_LOG_(INFO)
+        << "Stopping I/O loop due to too many consecutive dispatch errors.";
     ResetEvent(wait_handle());
     if (!unmount_requested_) {
       Unmount();
@@ -371,15 +417,19 @@ bool FileSystem::ReceiveIo() {
     MaybeFinishUnmount();
     return false;
   }
-  if (!device_.ControlAsync(IOCTL_EVENT_WAIT, &io_buffer_, &overlapped_)) {
+  ULONG ioctl = IOCTL_EVENT_WAIT;
+#ifdef NEXT_DOKANCC_RELEASE
+  ioctl = use_fsctl_events_ ? FSCTL_EVENT_WAIT : IOCTL_EVENT_WAIT;
+#endif
+  if (!device_.ControlAsync(ioctl, &io_buffer_, &overlapped_)) {
     util::SetAndNotify(&mutex_, &state_, &io_stopped_);
-    DOKAN_LOG_INFO(logger_, "The file system has stopped receiving I/O.");
+    DOKAN_LOG_(INFO) << "The file system has stopped receiving I/O.";
     MaybeFinishUnmount();
     return false;
   }
   if (!safe_to_access_) {
     util::SetAndNotify(&mutex_, &state_, &safe_to_access_);
-    DOKAN_LOG_INFO(logger_, "The file system is now safe to access.");
+    DOKAN_LOG_(INFO) << "The file system is now safe to access.";
     state_.notify_all();
   }
   return true;
@@ -387,11 +437,6 @@ bool FileSystem::ReceiveIo() {
 
 void FileSystem::DispatchIo() {
   AssertCalledOnIoThread();
-
-  // It might be ideal if we could pull back a batch of IRPs in here, at least
-  // in case more come in after we get signalled that there is one waiting
-  // request. However, the driver doesn't really work that way right now. It
-  // wants to match one IOCTL_EVENT_WAIT up to one real IRP.
   DWORD actual_buffer_size = 0;
   DWORD error = 0;
   bool success = device_.GetAsyncResult(&overlapped_, &actual_buffer_size,
@@ -401,34 +446,45 @@ void FileSystem::DispatchIo() {
     return;
   }
   dispatch_failure_count_ = 0;
-  EVENT_CONTEXT* original_request = reinterpret_cast<EVENT_CONTEXT*>(
-      &io_buffer_[0]);
-  if (original_request->MountId != driver_mount_id_) {
-    DOKAN_LOG_ERROR(logger_,
-                    "Received request targeting mount ID %u, but expected %u",
-                    original_request->MountId, driver_mount_id_);
-    return;
+  EVENT_CONTEXT* request = reinterpret_cast<EVENT_CONTEXT*>(&io_buffer_[0]);
+  DWORD remaining_buffer_size = actual_buffer_size;
+  while (remaining_buffer_size != 0) {
+    if (request->MountId != driver_mount_id_) {
+      DOKAN_LOG_(ERROR) << "Received request targeting mount ID "
+                        << request->MountId << ", but expected "
+                        << driver_mount_id_;
+      return;
+    }
+    DispatchRequest(request);
+    assert(request->Length <= remaining_buffer_size);
+    remaining_buffer_size -= request->Length;
+    if (!allow_request_batching_) {
+      assert(remaining_buffer_size == 0);
+      break;
+    }
+    request = reinterpret_cast<EVENT_CONTEXT*>(
+        reinterpret_cast<char*>(request) + request->Length);
   }
+}
 
-  // Copy the request because the I/O buffer could get reused while this
-  // request is pending. We could use a buffer pool or something to read into
-  // a buffer that's reserved until completion, but we're keeping it simple
-  // for now.
+void FileSystem::DispatchRequest(const EVENT_CONTEXT* original_request) {
+  // Make a copy of the request that will remain valid until its asynchronous
+  // completion. This gets deleted by the RequestCompleted function. We could
+  // use a pool/arena for this, but we're keeping it simple for now.
   EVENT_CONTEXT* request = reinterpret_cast<EVENT_CONTEXT*>(
-      new char[actual_buffer_size]);
-  memcpy(request, original_request, actual_buffer_size);
+      new char[original_request->Length]);
+  memcpy(request, original_request, original_request->Length);
   pending_requests_.insert(request);
   DispatchFn dispatch = GetDispatchFn(request->MajorFunction);
   if (dispatch) {
     (this->*dispatch)(request);
   } else {
-    // Office apps, for example, often try to set security and don't care if it
-    // fails. The result they get is the same as with the original DLL. If other
-    // unimplemented IRPs get invoked, it might be worth knowing.
+    // Office apps, for example, often try to set security and don't care if
+    // it fails. The result they get is the same as with the original DLL. If
+    // other unimplemented IRPs get invoked, it might be worth knowing.
     if (request->MajorFunction != IRP_MJ_SET_SECURITY) {
-      DOKAN_LOG_INFO(logger_,
-                     "No function for IRP: %u",
-                     static_cast<uint32_t>(request->MajorFunction));
+      DOKAN_LOG_(INFO) << "No function for IRP: "
+                       << static_cast<uint32_t>(request->MajorFunction);
     }
     auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
         sizeof(EVENT_INFORMATION));
@@ -446,8 +502,7 @@ bool FileSystem::WaitUntilSafeToAccess() {
     if (safe_to_access_ || io_stopped_) {
       return true;
     }
-    DOKAN_LOG_INFO(logger_,
-                   "Waiting for the file system to be safe to access...");
+    DOKAN_LOG_(INFO) << "Waiting for the file system to be safe to access...";
     return false;
   });
   return safe_to_access_;
@@ -460,7 +515,7 @@ void FileSystem::WaitUntilPostStartDone() {
   std::unique_lock<std::mutex> lock(mutex_);
   state_.wait(lock, [&] {
     if (!post_start_done_) {
-      DOKAN_LOG_INFO(logger_, "Waiting for PostStart to be done...");
+      DOKAN_LOG_(INFO) << "Waiting for PostStart to be done...";
       return false;
     }
     return true;
@@ -481,6 +536,9 @@ FileSystem::DispatchFn FileSystem::GetDispatchFn(ULONG major_irp_function) {
     case IRP_MJ_READ: return &FileSystem::DispatchRead;
     case IRP_MJ_WRITE: return &FileSystem::DispatchWrite;
     case IRP_MJ_FLUSH_BUFFERS: return &FileSystem::DispatchFlush;
+#ifdef NEXT_DOKANCC_RELEASE
+    case DOKAN_IRP_LOG_MESSAGE: return &FileSystem::DispatchDriverLogs;
+#endif
     default: return nullptr;
   }
 }
@@ -499,21 +557,22 @@ void FileSystem::DispatchCreate(EVENT_CONTEXT* request) {
   const DWORD options = request->Operation.Create.CreateOptions &
       FILE_VALID_OPTION_FLAGS;
 
-  FileHandle* const handle = new FileHandle(file_name, request->ProcessId,
-                                            options & FILE_DIRECTORY_FILE);
+  const DWORD desired_access =
+      request->Operation.Create.SecurityContext.DesiredAccess;
+  const DWORD share_access = request->Operation.Create.ShareAccess;
+  FileHandle* const handle =
+      new FileHandle(file_name, request->ProcessId, desired_access,
+                     share_access, options & FILE_DIRECTORY_FILE);
   if ((options & FILE_NON_DIRECTORY_FILE) && (options & FILE_DIRECTORY_FILE)) {
-    DOKAN_LOG_ERROR(logger_,
-                    "Both FILE_NON_DIRECTORY_FILE and FILE_DIRECTORY_FILE were"
-                    " specified in the same create request.");
+    DOKAN_LOG_(ERROR)
+        << "Both FILE_NON_DIRECTORY_FILE and FILE_DIRECTORY_FILE were "
+           "specified in the same create request.";
     CompleteCreate(request, handle, disposition, options,
                    STATUS_INVALID_PARAMETER);
     return;
   }
 
-  const DWORD desired_access =
-      request->Operation.Create.SecurityContext.DesiredAccess;
   const DWORD file_attributes = request->Operation.Create.FileAttributes;
-  const DWORD share_access = request->Operation.Create.ShareAccess;
   if (!(request->Flags & SL_OPEN_TARGET_DIRECTORY)) {
     // This is the normal case.
     file_callbacks_->Create(
@@ -530,10 +589,9 @@ void FileSystem::DispatchCreate(EVENT_CONTEXT* request) {
   // file. So this is a create/close for the specified directory, followed by
   // a create for parent. Note that this case is exercised for the destination
   // location when you do a simple MoveFile call.
-  DOKAN_LOG_TRACE(
-      logger_,
-      "Create requested with SL_OPEN_TARGET_DIRECTORY for path %S",
-      file_name.c_str());
+  DOKAN_LOG_(TRACE)
+      << "Create requested with SL_OPEN_TARGET_DIRECTORY for path "
+      << file_name;
   file_callbacks_->Create(
       handle, desired_access, file_attributes, share_access, disposition,
       options,
@@ -575,7 +633,7 @@ void FileSystem::DispatchParentCreate(EVENT_CONTEXT* request,
   const DWORD parent_options = (options | FILE_DIRECTORY_FILE) &
       ~FILE_NON_DIRECTORY_FILE;
   FileHandle* const parent_handle = new FileHandle(
-      parent_file_name, request->ProcessId, true);
+      parent_file_name, request->ProcessId, desired_access, share_access, true);
   file_callbacks_->Create(
       parent_handle, desired_access, file_attributes, share_access, disposition,
       parent_options,
@@ -590,8 +648,8 @@ void FileSystem::CompleteCreate(EVENT_CONTEXT* request,
                                 ULONG options,
                                 NTSTATUS status) {
   AssertCalledOnIoThread();
-  DOKAN_LOG_TRACE(logger_, "Completing create with callback status 0x%x for %S",
-                  status, handle->path().c_str());
+  DOKAN_LOG_(TRACE) << "Completing create with callback status " << Hex(status)
+                    << " for " << handle->path();
   auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
       sizeof(EVENT_INFORMATION));
   PrepareReply(status, request, handle, reply.get());
@@ -602,9 +660,9 @@ void FileSystem::CompleteCreate(EVENT_CONTEXT* request,
   if (success) {
     assert(handle->context());
     if (!handle->context()) {
-      DOKAN_LOG_ERROR(logger_, "No context was set for %S with disposition %d,"
-                      " options %d, status 0x%x", handle->path().c_str(),
-                      disposition, options, status);
+      DOKAN_LOG_(ERROR) << "No context was set for " << handle->path()
+                        << " with disposition " << disposition << ", options "
+                        << options << ", status " << Hex(status);
     }
     reply->Status = STATUS_SUCCESS;
     reply->Operation.Create.Information = FILE_OPENED;
@@ -638,17 +696,14 @@ void FileSystem::CompleteCreate(EVENT_CONTEXT* request,
     // allows FILE_DELETE_CHILD for the parent directory. For now at least, we
     // are assuming that logic is unneeded.
   }
-  DOKAN_LOG_TRACE(
-      logger_,
-      "Replying to driver for Create with status 0x%x, info %u for path %S",
-      reply->Status, reply->Operation.Create.Information,
-      handle->path().c_str());
+  DOKAN_LOG_(TRACE) << "Replying to driver for Create with status "
+                    << Hex(reply->Status) << ", info "
+                    << reply->Operation.Create.Information << " for path "
+                    << handle->path();
   if (reply->Status != STATUS_SUCCESS) {
     if (handle->context()) {
-      DOKAN_LOG_ERROR(
-          logger_,
-          "Unsuccessful Create callback for %S left a context in the handle.",
-          handle->path().c_str());
+      DOKAN_LOG_(ERROR) << "Unsuccessful Create callback for " << handle->path()
+                        << " left a context in the handle.";
     }
     assert(handle->reference_count() == 1);
     RemoveReference(&handle);
@@ -667,15 +722,14 @@ void FileSystem::DispatchGetInfo(EVENT_CONTEXT* request) {
       request, reply_size);
   FileHandle* const handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                   "DispatchGetInfo with info class %u bypassed due to null"
-                   " file handle.", info_class);
+    DOKAN_LOG_(ERROR) << "DispatchGetInfo with info class " << info_class
+                      << " bypassed due to null file handle.";
     CompleteGetInfo(request, handle, info_class, STATUS_INVALID_PARAMETER, 0,
                     std::move(reply));
     return;
   }
-  DOKAN_LOG_TRACE(logger_, "DispatchGetInfo for path %S and info class %u",
-                  handle->path().c_str(), info_class);
+  DOKAN_LOG_(TRACE) << "DispatchGetInfo for path " << handle->path()
+                    << " and info class " << info_class;
   auto complete = std::bind(&FileSystem::CompleteGetInfo, this, request, handle,
                             info_class, _1, _2, _3);
   file_info_handler_->GetInfo(request, handle, info_class, std::move(reply),
@@ -691,10 +745,10 @@ void FileSystem::CompleteGetInfo(
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply) {
   AssertCalledOnIoThread();
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_, "Replying to GetInfo for path %S and info class %u"
-        " with status 0x%x and used buffer size %u", handle->path().c_str(),
-        info_class, status, used_buffer_size);
+    DOKAN_LOG_(TRACE) << "Replying to GetInfo for path " << handle->path()
+                      << " and info class " << info_class << " with status "
+                      << Hex(status) << " and used buffer size "
+                      << used_buffer_size;
   }
   CompleteRequestWithVarReply(
       request, handle, status, request->Operation.File.BufferLength,
@@ -713,9 +767,8 @@ void FileSystem::DispatchGetSecurity(EVENT_CONTEXT* request) {
     CompleteRequestWithVarReply(
         request, handle, STATUS_NOT_SUPPORTED, buffer_length, 0,
         std::move(reply));
-    DOKAN_LOG_TRACE(
-        logger_,
-        "DispatchGetSecurity failed because no security descriptor was set.");
+    DOKAN_LOG_(TRACE)
+        << "DispatchGetSecurity failed because no security descriptor was set.";
     return;
   }
   PSECURITY_DESCRIPTOR descriptor = startup_options_.volume_security_descriptor;
@@ -730,14 +783,13 @@ void FileSystem::DispatchGetSecurity(EVENT_CONTEXT* request) {
     // that reply->BufferLength is no larger than the provided buffer length.
     // The driver uses reply->BufferLength to be the desired buffer length,
     // only in this one case.
-    DOKAN_LOG_TRACE(
-        logger_,
-        "DispatchGetSecurity for path %S and security info 0x%x"
-        " received insufficient buffer: %I32d; required size is %I32d",
-        handle ? handle->path().c_str() : L"<unknown>",
-        request->Operation.Security.SecurityInformation,
-        reply->BufferLength,
-        descriptor_length);
+    DOKAN_LOG_(TRACE) << "DispatchGetSecurity for path "
+                      << (handle ? handle->path() : L"<unknown>")
+                      << " and security info "
+                      << Hex(request->Operation.Security.SecurityInformation)
+                      << " received insufficient buffer: "
+                      << reply->BufferLength << "; required size is "
+                      << descriptor_length;
     reply->Status = STATUS_BUFFER_OVERFLOW;
     reply->BufferLength = descriptor_length;
     ReplyToDriver(request, std::move(reply), reply_size);
@@ -745,11 +797,11 @@ void FileSystem::DispatchGetSecurity(EVENT_CONTEXT* request) {
     return;
   }
   memcpy(reply->Buffer, descriptor, descriptor_length);
-  DOKAN_LOG_TRACE(
-      logger_,
-      "DispatchGetSecurity for path %S and security info 0x%x succeeded.",
-      handle ? handle->path().c_str() : L"<unknown>",
-      request->Operation.Security.SecurityInformation);
+  DOKAN_LOG_(TRACE) << "DispatchGetSecurity for path "
+                    << (handle ? handle->path() : L"<unknown>")
+                    << " and security info "
+                    << (request->Operation.Security.SecurityInformation)
+                    << " succeeded.";
   CompleteRequestWithVarReply(
       request, handle, STATUS_SUCCESS, buffer_length, descriptor_length,
       std::move(reply));
@@ -762,8 +814,7 @@ void FileSystem::DispatchGetVolumeInfo(EVENT_CONTEXT* request) {
   const ULONG reply_size = ComputeVarReplySize(buffer_size);
   util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
       request, reply_size);
-  DOKAN_LOG_TRACE(logger_, "DispatchGetVolumeInfo with info class %u",
-                  info_class);
+  DOKAN_LOG_(TRACE) << "DispatchGetVolumeInfo with info class " << info_class;
   auto complete = std::bind(&FileSystem::CompleteGetVolumeInfo, this, request,
                             info_class, _1, _2, _3);
   volume_info_handler_->GetVolumeInfo(request, info_class, std::move(reply),
@@ -777,9 +828,9 @@ void FileSystem::CompleteGetVolumeInfo(
     ULONG used_buffer_size,
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply) {
   AssertCalledOnIoThread();
-  DOKAN_LOG_TRACE(
-        logger_, "Replying to GetVolumeInfo for info class %u with status 0x%x"
-        " and used buffer size %u", info_class, status, used_buffer_size);
+  DOKAN_LOG_(TRACE) << "Replying to GetVolumeInfo for info class " << info_class
+                    << " with status " << Hex(status)
+                    << " and used buffer size " << used_buffer_size;
   CompleteRequestWithVarReply(
       request, /*handle=*/nullptr, status,
       request->Operation.Volume.BufferLength, used_buffer_size,
@@ -801,15 +852,14 @@ void FileSystem::DispatchChange(EVENT_CONTEXT* request) {
       request, reply_size);
   FileHandle* const handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                   "DispatchChange with info class %u bypassed due to null"
-                   " file handle.", info_class);
+    DOKAN_LOG_(ERROR) << "DispatchChange with info class " << info_class
+                      << " bypassed due to null file handle.";
     CompleteChange(request, handle, info_class, STATUS_INVALID_PARAMETER,
                    buffer_size, std::move(reply));
     return;
   }
-  DOKAN_LOG_TRACE(logger_, "DispatchChange for path %S and info class %u",
-                  handle->path().c_str(), info_class);
+  DOKAN_LOG_(TRACE) << "DispatchChange for path " << handle->path()
+                    << " and info class " << info_class;
   auto complete = std::bind(&FileSystem::CompleteChange, this, request, handle,
                             info_class, _1, buffer_size, _2);
   change_handler_->Change(request, handle, info_class, std::move(reply),
@@ -825,10 +875,9 @@ void FileSystem::CompleteChange(
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply) {
   AssertCalledOnIoThread();
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_, "Replying to Change for path %S and info class %u"
-        " with status 0x%x and used buffer size %u", handle->path().c_str(),
-        info_class, status, buffer_size);
+    DOKAN_LOG_(TRACE) << "Replying to Change for path " << handle->path()
+                      << " and info class " << info_class << " with status "
+                      << Hex(status) << " and used buffer size " << buffer_size;
   }
   CompleteRequestWithVarReply(
       request, handle, status, buffer_size, buffer_size, std::move(reply));
@@ -850,17 +899,16 @@ void FileSystem::DispatchFindFiles(EVENT_CONTEXT* request) {
   }
   FileHandle* const handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                    "DispatchFindFiles with info class %u bypassed due to null"
-                    " file handle.", info_class);
+    DOKAN_LOG_(ERROR) << "DispatchFindFiles with info class " << info_class
+                      << " bypassed due to null file handle.";
     CompleteFindFiles(request, handle, pattern, info_class,
                       STATUS_INVALID_PARAMETER, 0, start_file_index,
                       std::move(reply));
     return;
   }
-  DOKAN_LOG_TRACE(logger_, "DispatchFindFiles for path %S, pattern \"%S\", and"
-                  " info class %u", handle->path().c_str(), pattern.c_str(),
-                  info_class);
+  DOKAN_LOG_(TRACE) << "DispatchFindFiles for path " << handle->path()
+                    << ", pattern \"" << pattern << "\", and info class "
+                    << info_class;
   auto complete = std::bind(&FileSystem::CompleteFindFiles, this, request,
                             handle, pattern, info_class, _1, _2, _3, _4);
   const bool single_entry = request->Flags & SL_RETURN_SINGLE_ENTRY;
@@ -880,11 +928,10 @@ void FileSystem::CompleteFindFiles(
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply) {
   AssertCalledOnIoThread();
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_, "replying to FindFiles for path %S, pattern \"%S\", and info"
-        " class %u with status 0x%x and used buffer size %u",
-        handle->path().c_str(), pattern.c_str(), info_class, status,
-        used_buffer_size);
+    DOKAN_LOG_(TRACE) << "replying to FindFiles for path " << handle->path()
+                      << ", pattern \"" << pattern << "\", and info class "
+                      << info_class << " with status " << Hex(status)
+                      << " and used buffer size " << used_buffer_size;
   }
   reply->Operation.Directory.Index = next_request_start_index;
   CompleteRequestWithVarReply(
@@ -898,8 +945,7 @@ void FileSystem::DispatchRead(EVENT_CONTEXT* request) {
   const int32_t buffer_length = request->Operation.Read.BufferLength;
   FileHandle* handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                    "DispatchRead bypassed due to null file handle.");
+    DOKAN_LOG_(ERROR) << "DispatchRead bypassed due to null file handle.";
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
         request, sizeof(EVENT_INFORMATION));
     CompleteRead(request, handle, offset, buffer_length,
@@ -909,8 +955,8 @@ void FileSystem::DispatchRead(EVENT_CONTEXT* request) {
   if (buffer_length > kMaxReadSize) {
     // TODO(drivefs-team): Make this work by sending 2 payloads back to the
     // driver.
-    DOKAN_LOG_ERROR(logger_,
-                    "DispatchRead with unsupported size: %I32u", buffer_length);
+    DOKAN_LOG_(ERROR) << "DispatchRead with unsupported size: "
+                      << buffer_length;
     util::UniqueVarStructPtr<EVENT_INFORMATION> reply = PrepareVarReply(
         request, sizeof(EVENT_INFORMATION));
     CompleteRead(request, handle, offset, buffer_length,
@@ -930,9 +976,8 @@ void FileSystem::DispatchRead(EVENT_CONTEXT* request) {
   // top of the same driver.
   util::UniqueVarStructPtr<EVENT_INFORMATION> reply =
       PrepareVarReply(request, reply_size);
-  DOKAN_LOG_TRACE(logger_,
-                  "DispatchRead for path %S, offset %I64x, length %I32u",
-                  handle->path().c_str(), offset, buffer_length);
+  DOKAN_LOG_(TRACE) << "DispatchRead for path " << handle->path() << ", offset "
+                    << Hex(offset) << ", length " << buffer_length;
   EVENT_INFORMATION* raw_reply = reply.release();
   file_callbacks_->Read(
       handle, offset, buffer_length,
@@ -963,10 +1008,10 @@ void FileSystem::CompleteRead(
     }
   }
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_, "Replying to Read for path %S, offset %I64x, length %I32u,"
-        " actual length read %I32u, status 0x%x", handle->path().c_str(),
-        offset, buffer_length, actual_read_length, status);
+    DOKAN_LOG_(TRACE) << "Replying to Read for path " << handle->path()
+                      << ", offset " << Hex(offset) << ", length "
+                      << buffer_length << ", actual length read "
+                      << actual_read_length << ", status " << Hex(status);
   }
   CompleteRequestWithVarReply(request, handle, status, actual_read_length,
                               actual_read_length, std::move(reply));
@@ -979,8 +1024,7 @@ void FileSystem::DispatchWrite(EVENT_CONTEXT* raw_request) {
   int64_t offset = request->Operation.Write.ByteOffset.QuadPart;
   FileHandle* handle = ReferenceHandle(raw_request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                   "DispatchWrite bypassed due to null file handle.");
+    DOKAN_LOG_(ERROR) << "DispatchWrite bypassed due to null file handle.";
     CompleteWrite(std::move(request), handle, offset,
                   STATUS_INVALID_PARAMETER);
     return;
@@ -996,14 +1040,18 @@ void FileSystem::DispatchWrite(EVENT_CONTEXT* raw_request) {
     pending_requests_.insert(request.get());
     pending_requests_.erase(raw_request);
     raw_request = request.get();
-    bool result = device_.Control(
-        IOCTL_EVENT_WRITE, reply_with_buffer,
-        reinterpret_cast<char*>(request.get()), var_request_size);
+    ULONG ioctl = IOCTL_EVENT_WRITE;
+#ifdef NEXT_DOKANCC_RELEASE
+    ioctl = use_fsctl_events_ ? FSCTL_EVENT_WRITE : IOCTL_EVENT_WRITE;
+#endif
+    bool result = device_.Control(ioctl, reply_with_buffer,
+                                  reinterpret_cast<char*>(request.get()),
+                                  var_request_size);
     if (!result) {
       // Note: the old code actually ignores an error here.
-      DOKAN_LOG_ERROR(logger_,
-                      "IOCTL_EVENT_WRITE failed for path %S with request size"
-                      " %u", handle->path().c_str(), var_request_size);
+      DOKAN_LOG_(ERROR) << "FSCTL_EVENT_WRITE failed for path "
+                        << handle->path() << " with request size "
+                        << var_request_size;
       CompleteWrite(std::move(request), handle, offset, STATUS_IO_DEVICE_ERROR);
       return;
     }
@@ -1015,9 +1063,8 @@ void FileSystem::DispatchWrite(EVENT_CONTEXT* raw_request) {
   if (request->FileFlags & DOKAN_WRITE_TO_END_OF_FILE) {
     offset = kEndOfFileWriteOffset;
   }
-  DOKAN_LOG_TRACE(logger_,
-                  "DispatchWrite for path %S, offset %I64x, length %I32u",
-                  handle->path().c_str(), offset, length);
+  DOKAN_LOG_(TRACE) << "DispatchWrite for path " << handle->path()
+                    << ", offset " << Hex(offset) << ", length " << length;
   raw_request = request.release();
   file_callbacks_->Write(handle, offset, length, buffer, [=](NTSTATUS status) {
     CompleteWrite(std::move(util::MakeUniqueVarStruct(raw_request)),
@@ -1033,10 +1080,9 @@ void FileSystem::CompleteWrite(
   AssertCalledOnIoThread();
   const ULONG written_length = request->Operation.Write.BufferLength;
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_, "Replying to Write for path %S, offset %I64x, length %I32u,"
-        " status 0x%x", handle->path().c_str(),
-        offset, written_length, status);
+    DOKAN_LOG_(TRACE) << "Replying to Write for path " << handle->path()
+                      << ", offset " << Hex(offset) << ", length "
+                      << written_length << ", status " << Hex(status);
   }
   auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
       sizeof(EVENT_INFORMATION));
@@ -1050,12 +1096,33 @@ void FileSystem::CompleteWrite(
   RemoveReference(&handle);
 }
 
+#ifdef NEXT_DOKANCC_RELEASE
+void FileSystem::DispatchDriverLogs(EVENT_CONTEXT* request) {
+  AssertCalledOnIoThread();
+
+  PDOKAN_LOG_MESSAGE log_message = reinterpret_cast<PDOKAN_LOG_MESSAGE>(
+      (PCHAR)request + sizeof(EVENT_CONTEXT));
+  if (log_message->MessageLength) {
+    ULONG paquet_size = FIELD_OFFSET(DOKAN_LOG_MESSAGE, Message[0]) +
+                        log_message->MessageLength;
+    if (((PCHAR)log_message + paquet_size) <=
+        ((PCHAR)request + request->Length)) {
+      DOKAN_LOG_(TRACE) << std::string(log_message->Message,
+                                       log_message->MessageLength);
+    } else {
+      DOKAN_LOG_(TRACE) << "Invalid driver log message received.";
+    }
+  }
+
+  RequestCompleted(request);
+}
+#endif
+
 void FileSystem::DispatchFlush(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
   FileHandle* handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_ERROR(logger_,
-                   "DispatchFlush bypassed due to null file handle.");
+    DOKAN_LOG_(ERROR) << "DispatchFlush bypassed due to null file handle.";
     CompleteFlush(request, handle, STATUS_INVALID_PARAMETER);
     return;
   }
@@ -1069,10 +1136,8 @@ void FileSystem::CompleteFlush(EVENT_CONTEXT* request,
                                NTSTATUS status) {
   AssertCalledOnIoThread();
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(
-        logger_,
-        "Replying to driver for Flush with path %S",
-        handle->path().c_str());
+    DOKAN_LOG_(TRACE) << "Replying to driver for Flush with path "
+                      << handle->path();
   }
   auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
       sizeof(EVENT_INFORMATION));
@@ -1091,9 +1156,14 @@ void FileSystem::CompleteRequestWithVarReply(
   assert(used_var_buffer_size <= provided_var_buffer_size);
   reply->Status = status;
   reply->BufferLength = used_var_buffer_size;
-  // Note: reply->Buffer is overlaid  with a buffer of size
-  // provided_var_buffer_size in this case.
-  const ULONG reply_size = ComputeVarReplySize(provided_var_buffer_size);
+  // Note: reply->Buffer is overlaid with a buffer of size
+  // provided_var_buffer_size in this case, out of which used_var_buffer_size is
+  // relevant. We could derive the used_buffer_size from reply->BufferLength in
+  // most cases. A partial-fit STATUS_BUFFER_OVERFLOW is the one edge case where
+  // used_var_buffer_size may be larger than sizeof(EVENT_INFORMATION) and
+  // smaller than BufferLength (the space required to fit all the data),
+  // requiring the size value outside the struct.
+  const ULONG reply_size = ComputeVarReplySize(used_var_buffer_size);
   ReplyToDriver(request, std::move(reply), reply_size);
   RemoveReference(&handle);
 }
@@ -1117,9 +1187,8 @@ int64_t FileSystem::RemoveReference(FileHandle** handle) {
   }
   int64_t count = (*handle)->RemoveReference();
   if (count < 0) {
-    DOKAN_LOG_ERROR(logger_,
-                    "Handle reference count has dropped to %I64d for %S",
-                    count, (*handle)->path().c_str());
+    DOKAN_LOG_(ERROR) << "Handle reference count has dropped to " << count
+                      << " for " << (*handle)->path();
   } else if (count == 0) {
     if ((*handle)->context()) {
       // We should get in here for any case but a failed create.
@@ -1135,13 +1204,11 @@ void FileSystem::DispatchCleanup(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
   FileHandle* const handle = ReferenceHandle(request);
   if (handle == nullptr) {
-    DOKAN_LOG_INFO(logger_,
-                   "DispatchCleanup bypassed due to null file handle.");
+    DOKAN_LOG_(INFO) << "DispatchCleanup bypassed due to null file handle.";
     CompleteCleanup(request, nullptr, STATUS_SUCCESS);
     return;
   }
-  DOKAN_LOG_TRACE(logger_, "DispatchCleanup for path %S",
-                  handle->path().c_str());
+  DOKAN_LOG_(TRACE) << "DispatchCleanup for path " << handle->path();
   file_callbacks_->Cleanup(
       handle,
       std::bind(&FileSystem::CompleteCleanup, this, request, handle,
@@ -1156,13 +1223,13 @@ void FileSystem::CompleteCleanup(EVENT_CONTEXT* request, FileHandle* handle,
     // supported. It's unclear whether it should be. Since that could lead to
     // some bad resource leak problems, we should continue not allowing it until
     // a need is proven.
-    DOKAN_LOG_ERROR(logger_, "Cleanup callback returned error 0x%x for path %S",
-                    status, handle ? handle->path().c_str() : L"<unknown>");
+    DOKAN_LOG_(ERROR) << "Cleanup callback returned error " << Hex(status)
+                      << " for path "
+                      << (handle ? handle->path() : L"<unknown>");
   } else {
-    DOKAN_LOG_TRACE(
-        logger_,
-        "Replying successfully to driver for Cleanup with path %S",
-        handle ? handle->path().c_str() : L"<unknown>");
+    DOKAN_LOG_(TRACE)
+        << "Replying successfully to driver for Cleanup with path "
+        << (handle ? handle->path() : L"<unknown>");
   }
   auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(
       sizeof(EVENT_INFORMATION));
@@ -1175,8 +1242,7 @@ void FileSystem::DispatchClose(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
   FileHandle* handle = ReferenceHandle(request);
   if (handle != nullptr) {
-    DOKAN_LOG_TRACE(logger_, "DispatchClose with path %S",
-                    handle->path().c_str());
+    DOKAN_LOG_(TRACE) << "DispatchClose with path " << handle->path();
     RemoveReference(&handle);  // Our own reference.
     RemoveReference(&handle);  // The creation reference.
     // Normally the above call invokes the Close callback, but on the off chance
@@ -1185,7 +1251,7 @@ void FileSystem::DispatchClose(EVENT_CONTEXT* request) {
     // probably happens when an IRP is canceled and user mode is unaware of the
     // cancellation.
   } else {
-    DOKAN_LOG_INFO(logger_, "DispatchClose bypassed due to null file handle.");
+    DOKAN_LOG_(INFO) << "DispatchClose bypassed due to null file handle.";
   }
   RequestCompleted(request);
 }

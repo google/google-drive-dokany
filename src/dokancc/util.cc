@@ -40,10 +40,20 @@ void UUIDToString(const GUID guid, char* out) {
       guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
 }
 
-static std::mutex converter_mutex;
-static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+static std::mutex g_converter_mutex;
+static NarrowingConverter g_converter;
 
 }  // anonymous namespace
+
+bool UseNarrowingConverter(
+    const std::function<void(NarrowingConverter*)>& fn) {
+  std::lock_guard<std::mutex> auto_lock(g_converter_mutex);
+  try {
+    fn(&g_converter);
+    return true;
+  } catch (const std::range_error& exception) {}
+  return false;
+}
 
 bool FileNameMatcher::Init(const std::wstring& pattern) {
   assert(pattern_.Buffer == nullptr);
@@ -79,62 +89,6 @@ int64_t Align(size_t block_size, int64_t value) {
   return r > 0 ? (value + block_size - r) : value;
 }
 
-std::wstring SanitizePath(const std::wstring& path) {
-  size_t start = 0;
-  size_t end = path.size();
-  if (path.size() > 1 && path[0] == '\\' && path[1] == '\\') {
-    ++start;
-  }
-  if (path.size() > 2 && path[path.size() - 1] == '\\')  {
-    --end;
-  }
-  return path.substr(start, end);
-}
-
-std::wstring StripLastPathComponent(const std::wstring& path) {
-  size_t index = path.rfind('\\');
-  // It should already be a "sanitized" path.
-  assert(index != path.size() - 1 || path.size() == 1);
-  if (index == std::string::npos) {
-    index = path.rfind('/');
-  }
-  if (index == 0 || index == std::string::npos) {
-    return L"\\";
-  }
-  return path.substr(0, index);
-}
-
-std::wstring ReplaceLastPathComponent(const std::wstring& path,
-                                      const std::wstring& name) {
-  assert(path.size() > 1);
-  std::wstring stripped = StripLastPathComponent(path);
-  assert(!stripped.empty());
-  return stripped.size() == 1 ? (stripped + name) : (stripped + L'\\' + name);
-}
-
-void SplitAlternateStreamName(std::wstring* path, std::wstring* stream_name) {
-  size_t colon_index = path->find(':');
-  if (colon_index == std::string::npos) {
-    *stream_name = L"";
-    return;
-  }
-  *stream_name = path->substr(colon_index + 1);
-  *path = path->substr(0, colon_index);
-}
-
-std::wstring MakeDevicePath(const std::wstring& device_name) {
-  assert(!device_name.empty() && device_name[0] == L'\\');
-  return std::wstring(L"\\\\?") + device_name;
-}
-
-std::wstring MakeDevicePath(const std::wstring& device_name,
-                            const std::wstring& subpath) {
-  if (subpath.empty() || subpath[0] == '\\') {
-    return MakeDevicePath(device_name) + subpath;
-  }
-  return MakeDevicePath(device_name) + L'\\' + subpath;
-}
-
 bool CheckDriverVersion(const GUID& driver_version, Logger* logger) {
   GUID user_version = DOKAN_DRIVER_VERSION;
   if (!IsEqualGUID(driver_version, user_version)) {
@@ -142,18 +96,9 @@ bool CheckDriverVersion(const GUID& driver_version, Logger* logger) {
     UUIDToString(driver_version, driver_version_str);
     char user_version_str[50];
     UUIDToString(user_version, user_version_str);
-    DOKAN_LOG_ERROR(logger, "Driver version %s does not match DLL version %s",
-                    driver_version_str, user_version_str);
-    return false;
-  }
-  return true;
-}
-
-bool Narrow(const std::wstring& str, std::string* out) {
-  std::lock_guard<std::mutex> auto_lock(converter_mutex);
-  try {
-    *out = converter.to_bytes(str);
-  } catch (const std::range_error& exception) {
+    DOKAN_LOG(ERROR(logger))
+        << "Driver version " << driver_version_str
+        << " does not match DLL version " << user_version_str;
     return false;
   }
   return true;

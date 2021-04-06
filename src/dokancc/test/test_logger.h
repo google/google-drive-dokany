@@ -26,6 +26,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "third_party/dokan/src/dokancc/logger.h"
@@ -35,19 +36,16 @@ namespace test {
 
 class TestLogger : public Logger {
  public:
-  void VLogInfo(const LogSite& site, const char* format, va_list args) override;
-
-  void VLogError(const LogSite& site, const char* format,
-                 va_list args) override;
-
-  void VLogTrace(const LogSite& site, const char* format,
-                 va_list args) override;
+  void Log(LogLevel log_level, const LogSite& site,
+           std::string_view msg) override;
 
   bool HasErrors() const { return !error_.empty(); }
 
+  std::vector<std::string> GetTrace() const { return trace_; }
+
  private:
-  void Write(const char* prefix, const LogSite& site, const char* format,
-             va_list args, std::vector<std::string>* v);
+  void Write(const char* prefix, const LogSite& site, std::string_view msg,
+             std::vector<std::string>* v);
 
   std::mutex mutex_;
   std::vector<std::string> info_;

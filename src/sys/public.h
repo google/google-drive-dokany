@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2018 Google, Inc.
-  Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 - 2021 Google, Inc.
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -32,38 +32,60 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 // a fixed-size buffer.
 #define VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE (1024 * 16)
 
-#define IOCTL_TEST                                                             \
+#define IOCTL_GET_VERSION                                                      \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_GET_VERSION \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_SET_DEBUG_MODE                                                   \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_SET_DEBUG_MODE \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_WAIT                                                       \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_WAIT \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_INFO                                                       \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_INFO \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_RELEASE                                                    \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_RELEASE \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_START                                                      \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_START \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_WRITE                                                      \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_WRITE \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
 #define IOCTL_SERVICE_WAIT                                                     \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_SERVICE_WAIT \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_RESET_TIMEOUT                                                    \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_RESET_TIMEOUT \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_GET_ACCESS_TOKEN                                                 \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_GET_ACCESS_TOKEN \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IOCTL_EVENT_MOUNTPOINT_LIST                                            \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_EVENT_MOUNTPOINT_LIST \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // DeviceIoControl code to send to a keepalive handle to activate it (see the
 // documentation for the keepalive flags in the DokanFCB struct).
@@ -78,6 +100,13 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 // buffer.
 #define FSCTL_VOLUME_LABEL                                                     \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// DeviceIoControl code to retrieve the VOLUME_METRICS struct for the targeted
+// volume.
+#define IOCTL_GET_VOLUME_METRICS                                               \
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_GET_VOLUME_METRICS \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define DRIVER_FUNC_INSTALL 0x01
 #define DRIVER_FUNC_REMOVE 0x02
@@ -103,13 +132,21 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define DOKAN_WRITE_TO_END_OF_FILE 128
 #define DOKAN_NOCACHE 256
 #define DOKAN_RETRY_CREATE 512
+#define DOKAN_EVER_USED_IN_NOTIFY_LIST 1024
 
 // used in DOKAN_START->DeviceType
 #define DOKAN_DISK_FILE_SYSTEM 0
 #define DOKAN_NETWORK_FILE_SYSTEM 1
 
+// Special files that are tagged for specfic FS purpose when their FCB is init.
+// Note: This file names can no longer be used by userland FS correctly.
 #define DOKAN_KEEPALIVE_FILE_NAME L"\\__drive_fs_keepalive"
-#define DOKAN_NOTIFICATION_FILE_NAME  L"\\drive_fs_notification"
+#define DOKAN_NOTIFICATION_FILE_NAME L"\\drive_fs_notification"
+
+// The minimum FCB garbage collection interval, below which the parameter is
+// ignored (instantaneous deletion with an interval of 0 is more efficient than
+// using the machinery with a tight interval).
+#define MIN_FCB_GARBAGE_COLLECTION_INTERVAL 500
 
 /*
  * This structure is used for copying UNICODE_STRING from the kernel mode driver
@@ -327,6 +364,23 @@ typedef struct _EVENT_CONTEXT {
   } Operation;
 } EVENT_CONTEXT, *PEVENT_CONTEXT;
 
+// The output from IOCTL_GET_VOLUME_METRICS.
+typedef struct _VOLUME_METRICS {
+  ULONG64 NormalFcbGarbageCollectionCycles;
+  // A "cycle" can consist of multiple "passes".
+  ULONG64 NormalFcbGarbageCollectionPasses;
+  ULONG64 ForcedFcbGarbageCollectionPasses;
+  ULONG64 FcbAllocations;
+  ULONG64 FcbDeletions;
+  // A "cancellation" is when a single FCB's garbage collection gets canceled.
+  ULONG64 FcbGarbageCollectionCancellations;
+  // Number of IRPs with a too large buffer that could not be registered for
+  // being forward to userland.
+  ULONG64 LargeIRPRegistrationCanceled;
+  // Count usage for FSCTL_VOLUME_LABEL ioctl.
+  ULONG64 FsctlVolumeLabelCount;
+} VOLUME_METRICS, *PVOLUME_METRICS;
+
 #define WRITE_MAX_SIZE                                                         \
   (EVENT_CONTEXT_MAX_SIZE - sizeof(EVENT_CONTEXT) - 256 * sizeof(WCHAR))
 
@@ -364,21 +418,24 @@ typedef struct _EVENT_INFORMATION {
 
 } EVENT_INFORMATION, *PEVENT_INFORMATION;
 
-#define DOKAN_EVENT_ALTERNATIVE_STREAM_ON 1
-#define DOKAN_EVENT_WRITE_PROTECT 2
-#define DOKAN_EVENT_REMOVABLE 4
-#define DOKAN_EVENT_MOUNT_MANAGER 8
-#define DOKAN_EVENT_CURRENT_SESSION 16
-#define DOKAN_EVENT_FILELOCK_USER_MODE 32
-#define DOKAN_EVENT_LOCK_DEBUG_ENABLED 64
-#define DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS 128
-#define DOKAN_EVENT_ENABLE_OPLOCKS 256
-#define DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH 512
-#define DOKAN_EVENT_DRIVE_LETTER_IN_USE 1024
-#define DOKAN_EVENT_LOG_OPLOCKS 2048
-#define DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT 4096
-#define DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT 8192
-#define DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED 16384
+// Dokan mount options
+#define DOKAN_EVENT_ALTERNATIVE_STREAM_ON                           1
+#define DOKAN_EVENT_WRITE_PROTECT                                   (1 << 1)
+#define DOKAN_EVENT_REMOVABLE                                       (1 << 2)
+#define DOKAN_EVENT_MOUNT_MANAGER                                   (1 << 3)
+#define DOKAN_EVENT_CURRENT_SESSION                                 (1 << 4)
+#define DOKAN_EVENT_FILELOCK_USER_MODE                              (1 << 5)
+#define DOKAN_EVENT_LOCK_DEBUG_ENABLED                              (1 << 6)
+#define DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS                         (1 << 7)
+// No longer used option (1 << 8)
+// No longer used option (1 << 9)
+#define DOKAN_EVENT_DRIVE_LETTER_IN_USE                             (1 << 10)
+#define DOKAN_EVENT_LOG_OPLOCKS                                     (1 << 11)
+#define DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT       (1 << 12)
+#define DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT             (1 << 13)
+#define DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED                      (1 << 14)
+#define DOKAN_EVENT_ALLOW_IPC_BATCHING                              (1 << 15)
+#define DOKAN_EVENT_DISPATCH_DRIVER_LOGS                            (1 << 16)
 
 // Non-exclusive bits that can be set in EVENT_DRIVER_INFO.Flags for the driver
 // to send back extra info about what happened during a mount attempt, whether
@@ -427,6 +484,7 @@ typedef struct _EVENT_START {
   ULONG IrpTimeout;
   ULONG VolumeSecurityDescriptorLength;
   char VolumeSecurityDescriptor[VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE];
+  ULONG FcbGarbageCollectionIntervalMs;
 } EVENT_START, *PEVENT_START;
 
 typedef struct _DOKAN_RENAME_INFORMATION {
@@ -440,5 +498,15 @@ typedef struct _DOKAN_LINK_INFORMATION {
   ULONG FileNameLength;
   WCHAR FileName[1];
 } DOKAN_LINK_INFORMATION, *PDOKAN_LINK_INFORMATION;
+
+// Dokan Major IRP values dispatched to userland for custom request with
+// EVENT_CONTEXT.
+#define DOKAN_IRP_LOG_MESSAGE 0x20
+
+// Driver log message disptached during DOKAN_IRP_LOG_MESSAGE event.
+typedef struct _DOKAN_LOG_MESSAGE {
+  ULONG MessageLength;
+  CHAR Message[1];
+} DOKAN_LOG_MESSAGE, *PDOKAN_LOG_MESSAGE;
 
 #endif // PUBLIC_H_

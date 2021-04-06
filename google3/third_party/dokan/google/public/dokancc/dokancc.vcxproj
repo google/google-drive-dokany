@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\src\dokancc\api.h" />
+    <ClInclude Include="..\..\..\src\dokancc\change_handler.h" />
+    <ClInclude Include="..\..\..\src\dokancc\device.h" />
+    <ClInclude Include="..\..\..\src\dokancc\driver_log_subscriber.h" />
+    <ClInclude Include="..\..\..\src\dokancc\file_callbacks.h" />
+    <ClInclude Include="..\..\..\src\dokancc\file_handle.h" />
+    <ClInclude Include="..\..\..\src\dokancc\file_info.h" />
+    <ClInclude Include="..\..\..\src\dokancc\file_info_handler.h" />
+    <ClInclude Include="..\..\..\src\dokancc\file_system.h" />
+    <ClInclude Include="..\..\..\src\dokancc\find_handler.h" />
+    <ClInclude Include="..\..\..\src\dokancc\hex_util.h" />
+    <ClInclude Include="..\..\..\src\dokancc\kernel_defs.h" />
+    <ClInclude Include="..\..\..\src\dokancc\logger.h" />
+    <ClInclude Include="..\..\..\src\dokancc\notification_handler.h" />
+    <ClInclude Include="..\..\..\src\dokancc\reply_handler.h" />
+    <ClInclude Include="..\..\..\src\dokancc\reply_monitor.h" />
+    <ClInclude Include="..\..\..\src\dokancc\startup_options.h" />
+    <ClInclude Include="..\..\..\src\dokancc\util.h" />
+    <ClInclude Include="..\..\..\src\dokancc\volume_callbacks.h" />
+    <ClInclude Include="..\..\..\src\dokancc\volume_info_handler.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\..\src\dokancc\change_handler.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\device.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\driver_log_subscriber.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\file_handle.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\file_info_handler.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\file_system.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\find_handler.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\notification_handler.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\reply_handler.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\util.cc" />
+    <ClCompile Include="..\..\..\src\dokancc\volume_info_handler.cc" />
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <ProjectGuid>{92630C55-FC33-489E-98EF-F858AE6FFE81}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>dokancc</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <LinkIncremental>true</LinkIncremental>
+    <TargetName>$(ProjectName)$(DOKAN_MAJOR_API_VERSION_NUM)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <TargetName>$(ProjectName)$(DOKAN_MAJOR_API_VERSION_NUM)</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>$(ProjectName)$(DOKAN_MAJOR_API_VERSION_NUM)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>$(ProjectName)$(DOKAN_MAJOR_API_VERSION_NUM)</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>NEXT_DOKANCC_RELEASE;NOMINMAX;_EXPORTING;DOKANCC_DLL;_CRT_SECURE_NO_WARNINGS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;DOKAN_BUILD_LABEL=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);DOKAN_DIRECTORY_MOUNTING_BASE_GUID=$(DOKAN_DIRECTORY_MOUNTING_BASE_GUID);VOLUME_LABEL=$(VOLUME_LABEL);WIN32;_DEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\..\..\src\sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ntdll.lib;wevtapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>notelemetry.obj %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>NEXT_DOKANCC_RELEASE;NOMINMAX;_EXPORTING;DOKANCC_DLL;_CRT_SECURE_NO_WARNINGS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;DOKAN_BUILD_LABEL=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);DOKAN_DIRECTORY_MOUNTING_BASE_GUID=$(DOKAN_DIRECTORY_MOUNTING_BASE_GUID);VOLUME_LABEL=$(VOLUME_LABEL);_DEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\..\..\src\sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ntdll.lib;wevtapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>notelemetry.obj %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NEXT_DOKANCC_RELEASE;NOMINMAX;_EXPORTING;DOKANCC_DLL;_CRT_SECURE_NO_WARNINGS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;DOKAN_BUILD_LABEL=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);DOKAN_DIRECTORY_MOUNTING_BASE_GUID=$(DOKAN_DIRECTORY_MOUNTING_BASE_GUID);VOLUME_LABEL=$(VOLUME_LABEL);WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\..\..\src\sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ntdll.lib;wevtapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>notelemetry.obj %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NEXT_DOKANCC_RELEASE;NOMINMAX;_EXPORTING;DOKANCC_DLL;_CRT_SECURE_NO_WARNINGS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;DOKAN_BUILD_LABEL=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);DOKAN_DIRECTORY_MOUNTING_BASE_GUID=$(DOKAN_DIRECTORY_MOUNTING_BASE_GUID);VOLUME_LABEL=$(VOLUME_LABEL);NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>..\..\..\src\sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ntdll.lib;wevtapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>notelemetry.obj %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

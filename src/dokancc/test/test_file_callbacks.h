@@ -74,7 +74,7 @@ struct Context {
   std::shared_ptr<Observer> observer;
 };
 
-std::shared_ptr<Observer> GetObserver(const FileHandle* handle) {
+static std::shared_ptr<Observer> GetObserver(const FileHandle* handle) {
   assert(handle->context());
   return reinterpret_cast<Context*>(handle->context())->observer;
 }
@@ -113,6 +113,9 @@ class TestFileCallbacks : public FileCallbacks {
     if (delay) {
       Sleep(delay);
     }
+    if (!handle_matched_ && handle_matcher_ && handle_matcher_(handle)) {
+      handle_matched_ = true;
+    }
     util::StatusCallback callback_wrapper = [=](NTSTATUS status) {
       Context* context = nullptr;
       if (status == STATUS_SUCCESS) {
@@ -140,7 +143,15 @@ class TestFileCallbacks : public FileCallbacks {
       callback_invoker_(callback_wrapper, STATUS_ACCESS_DENIED);
       return;
     }
-    const auto it = file_info_.find(MapKey(handle));
+    const auto key = MapKey(handle);
+    auto it = file_info_.find(key);
+    if (it == file_info_.end() && allow_create_files &&
+        (create_disposition == FILE_SUPERSEDE ||
+         create_disposition == FILE_CREATE ||
+         create_disposition == FILE_OVERWRITE_IF)) {
+      SetUpFile(key);
+      it = file_info_.find(key);
+    }
     if (it != file_info_.end()) {
       if (it->second.file_attributes & FILE_ATTRIBUTE_DIRECTORY) {
         handle->set_directory(true);
@@ -320,6 +331,10 @@ class TestFileCallbacks : public FileCallbacks {
     create_delay_[path] = delay_ms;
   }
 
+  void SetAllowCreateFiles(bool allow) {
+    allow_create_files = allow;
+  }
+
   void SetUpFile(const std::wstring& path, const FileInfo& info = {}) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     file_info_[path] = info;
@@ -339,6 +354,17 @@ class TestFileCallbacks : public FileCallbacks {
     FileInfo& stored_info = file_info_[path];
     file_content_[path] = content;
     stored_info.file_size = content.size();
+  }
+
+  void SetHandleMatcher(std::function<bool(const FileHandle*)> matcher) {
+    handle_matcher_ = matcher;
+  }
+
+  bool CheckHandleMatcher() {
+    assert(handle_matcher_);
+    bool result = handle_matched_;
+    handle_matched_ = false;
+    return result;
   }
 
   void ForgetFile(const std::wstring& path) {
@@ -491,6 +517,9 @@ class TestFileCallbacks : public FileCallbacks {
   std::atomic<NTSTATUS> write_result_{STATUS_SUCCESS};
   std::atomic<NTSTATUS> flush_result_{STATUS_SUCCESS};
   std::atomic<NTSTATUS> get_delete_approval_result_{STATUS_SUCCESS};
+  std::function<bool(const FileHandle*)> handle_matcher_;
+  bool handle_matched_{false};
+  bool allow_create_files{false};
 };
 
 }  // namespace test

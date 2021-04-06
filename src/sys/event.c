@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2018 Google, Inc.
-  Copyright (C) 2015 - 2016 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 - 2021 Google, Inc.
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -21,6 +21,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "util/irp_buffer_helper.h"
+#include "util/mountmgr.h"
+#include "util/str.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, DokanOplockComplete)
@@ -41,6 +44,7 @@ VOID DokanCreateIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
     Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_EVENT] = NULL;
     InterlockedAnd64(&irpEntry->TickCount.QuadPart, 0);
     irpEntry->AsyncStatus = STATUS_CANCELLED;
+    irpEntry->RequestContext.ForcedCanceled = TRUE;
     PDokanVCB vcb = DeviceObject->DeviceExtension;
     PDokanDCB dcb = vcb->Dcb;
     KeSetEvent(&dcb->ForceTimeoutEvent, 0, FALSE);
@@ -53,14 +57,18 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
   KIRQL oldIrql;
   PIRP_ENTRY irpEntry;
   ULONG serialNumber = 0;
-  PIO_STACK_LOCATION irpSp = NULL;
-
-  UNREFERENCED_PARAMETER(DeviceObject);
-
-  DDbgPrint("==> DokanIrpCancelRoutine\n");
+  REQUEST_CONTEXT requestContext;
+  NTSTATUS status;
 
   // Release the cancel spinlock
   IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+  status = DokanBuildRequestContext(DeviceObject, Irp, &requestContext);
+  if (!NT_SUCCESS(status)) {
+    DOKAN_LOG_("Failed to build request context for IRP=%p Status=%s", Irp,
+               DokanGetNTSTATUSStr(status));
+    return;
+  }
 
   irpEntry = Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_IRP_ENTRY];
 
@@ -71,8 +79,7 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
     ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
     KeAcquireSpinLock(lock, &oldIrql);
 
-    irpSp = IoGetCurrentIrpStackLocation(Irp);
-    ASSERT(irpSp != NULL);
+    DOKAN_LOG_FINE_IRP((&requestContext), "Start cancel");
 
     serialNumber = irpEntry->SerialNumber;
 
@@ -81,7 +88,7 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
 
     // If Write is canceld before completion and buffer that saves writing
     // content is not freed, free it here
-    if (irpSp->MajorFunction == IRP_MJ_WRITE) {
+    if (requestContext.IrpSp->MajorFunction == IRP_MJ_WRITE) {
       PVOID eventContext =
           Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_EVENT];
       if (eventContext != NULL) {
@@ -91,11 +98,10 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
     }
 
     if (IsListEmpty(&irpEntry->IrpList->ListHead)) {
-      // DDbgPrint("    list is empty ClearEvent\n");
       KeClearEvent(&irpEntry->IrpList->NotEmpty);
     }
 
-    irpEntry->Irp = NULL;
+    irpEntry->RequestContext.Irp = NULL;
 
     if (irpEntry->CancelRoutineFreeMemory == FALSE) {
       InitializeListHead(&irpEntry->ListEntry);
@@ -107,12 +113,11 @@ VOID DokanIrpCancelRoutine(_Inout_ PDEVICE_OBJECT DeviceObject,
     Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_IRP_ENTRY] = NULL;
 
     KeReleaseSpinLock(lock, oldIrql);
+    DOKAN_LOG_FINE_IRP((&requestContext), "Canceled");
   }
 
-  DDbgPrint("   canceled IRP #%X\n", serialNumber);
-  DokanCompleteIrpRequest(Irp, STATUS_CANCELLED, 0);
-
-  DDbgPrint("<== DokanIrpCancelRoutine\n");
+  Irp->IoStatus.Information = 0;
+  DokanCompleteIrpRequest(Irp, STATUS_CANCELLED);
 }
 
 VOID DokanOplockComplete(IN PVOID Context, IN PIRP Irp)
@@ -129,24 +134,35 @@ Return Value:
 None.
 --*/
 {
-  PIO_STACK_LOCATION irpSp;
-
-  DDbgPrint("==> DokanOplockComplete\n");
   PAGED_CODE();
 
-  irpSp = IoGetCurrentIrpStackLocation(Irp);
+  if (Irp == NULL) {
+    DOKAN_LOG("NULL Irp received");
+    return;
+  }
+  PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+
+  REQUEST_CONTEXT requestContext;
+  NTSTATUS status =
+      DokanBuildRequestContext(irpSp->DeviceObject, Irp, &requestContext);
+  if (!NT_SUCCESS(status)) {
+    DOKAN_LOG_("Failed to build request context for IRP=%p Status=%s", Irp,
+               DokanGetNTSTATUSStr(status));
+    return;
+  }
+
+  DOKAN_LOG_FINE_IRP((&requestContext), "Oplock break completed %s",
+                     DokanGetNTSTATUSStr(Irp->IoStatus.Status));
 
   //
   //  Check on the return value in the Irp.
   //
   if (Irp->IoStatus.Status == STATUS_SUCCESS) {
-    DokanRegisterPendingIrp(irpSp->DeviceObject, Irp, (PEVENT_CONTEXT)Context,
-                            0);
+    DokanRegisterPendingIrp(&requestContext, (PEVENT_CONTEXT)Context);
   } else {
-    DokanCompleteIrpRequest(Irp, Irp->IoStatus.Status, 0);
+    Irp->IoStatus.Information = 0;
+    DokanCompleteIrpRequest(Irp, Irp->IoStatus.Status);
   }
-
-  DDbgPrint("<== DokanOplockComplete\n");
 }
 
 // Routine for kernel oplock functions to invoke if they are going to wait for
@@ -156,41 +172,33 @@ None.
 // do the right thing here with conservative impact.
 VOID DokanPrePostIrp(IN PVOID Context, IN PIRP Irp)
 {
-  DDbgPrint("==> DokanPrePostIrp\n");
-
   UNREFERENCED_PARAMETER(Context);
+  PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+  REQUEST_CONTEXT requestContext;
+  DokanBuildRequestContext(irpSp->DeviceObject, Irp, &requestContext);
+  DOKAN_LOG_FINE_IRP((&requestContext), "Mark Irp pending");
   IoMarkIrpPending(Irp);
-
-  DDbgPrint("<== DokanPrePostIrp\n");
 }
 
 NTSTATUS
-RegisterPendingIrpMain(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp,
-                       __in ULONG SerialNumber, __in PIRP_LIST IrpList,
-                       __in ULONG Flags, __in ULONG CheckMount,
+RegisterPendingIrpMain(__in PREQUEST_CONTEXT RequestContext,
+                       __in_opt PEVENT_CONTEXT EventContext,
+                       __in PIRP_LIST IrpList, __in ULONG CheckMount,
                        __in NTSTATUS CurrentStatus) {
   PIRP_ENTRY irpEntry;
-  PIO_STACK_LOCATION irpSp;
   KIRQL oldIrql;
-  PDokanVCB vcb = NULL;
 
-  DDbgPrint("==> DokanRegisterPendingIrpMain\n");
-
-  if (GetIdentifierType(DeviceObject->DeviceExtension) == VCB) {
-    vcb = DeviceObject->DeviceExtension;
-    if (CheckMount && IsUnmountPendingVcb(vcb)) {
-      DDbgPrint(" device is not mounted\n");
-      return STATUS_NO_SUCH_DEVICE;
-    }
+  if (RequestContext->Vcb && CheckMount &&
+      IsUnmountPendingVcb(RequestContext->Vcb)) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "Device is not mounted");
+    return STATUS_NO_SUCH_DEVICE;
   }
-
-  irpSp = IoGetCurrentIrpStackLocation(Irp);
 
   // Allocate a record and save all the event context.
   irpEntry = DokanAllocateIrpEntry();
 
   if (NULL == irpEntry) {
-    DDbgPrint("  can't allocate IRP_ENTRY\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "Can't allocate IRP_ENTRY");
     return STATUS_INSUFFICIENT_RESOURCES;
   }
 
@@ -198,317 +206,410 @@ RegisterPendingIrpMain(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp,
 
   InitializeListHead(&irpEntry->ListEntry);
 
-  irpEntry->SerialNumber = SerialNumber;
-  irpEntry->FileObject = irpSp->FileObject;
-  irpEntry->Irp = Irp;
-  irpEntry->IrpSp = irpSp;
+  irpEntry->SerialNumber = 0;
+  irpEntry->RequestContext = *RequestContext;
   irpEntry->IrpList = IrpList;
-  irpEntry->Flags = Flags;
   irpEntry->AsyncStatus = CurrentStatus;
 
   // Update the irp timeout for the entry
-  if (vcb) {
-    ExAcquireResourceExclusiveLite(&vcb->Dcb->Resource, TRUE);
-    DokanUpdateTimeout(&irpEntry->TickCount, vcb->Dcb->IrpTimeout);
-    ExReleaseResourceLite(&vcb->Dcb->Resource);
+  if (RequestContext->Vcb) {
+    ExAcquireResourceExclusiveLite(&RequestContext->Dcb->Resource, TRUE);
+    DokanUpdateTimeout(&irpEntry->TickCount, RequestContext->Dcb->IrpTimeout);
+    ExReleaseResourceLite(&RequestContext->Dcb->Resource);
   } else {
     DokanUpdateTimeout(&irpEntry->TickCount, DOKAN_IRP_PENDING_TIMEOUT);
   }
 
-  // DDbgPrint("  Lock IrpList.ListLock\n");
   ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
   KeAcquireSpinLock(&IrpList->ListLock, &oldIrql);
 
-  if (irpSp->MajorFunction == IRP_MJ_CREATE) {
-    IoSetCancelRoutine(Irp, DokanCreateIrpCancelRoutine);
-  } else {
-    IoSetCancelRoutine(Irp, DokanIrpCancelRoutine);
+  // Second unmount check with list lock acquired to ensure the device is
+  // not being unmount. Once DokanEventRelease has set the unmount-pending flag
+  // and canceled all IRPs, any IRP added to those list will never be completed
+  // and canceled.
+  if (RequestContext->Vcb && CheckMount &&
+      IsUnmountPendingVcb(RequestContext->Vcb)) {
+    KeReleaseSpinLock(&IrpList->ListLock, oldIrql);
+    DokanFreeIrpEntry(irpEntry);
+    return STATUS_NO_SUCH_DEVICE;
   }
 
-  if (Irp->Cancel) {
-    if (IoSetCancelRoutine(Irp, NULL) != NULL) {
-      // DDbgPrint("  Release IrpList.ListLock %d\n", __LINE__);
+  if (EventContext) {
+    EventContext->SerialNumber =
+        InterlockedIncrement((LONG*)&RequestContext->Dcb->SerialNumber);
+    irpEntry->SerialNumber = EventContext->SerialNumber;
+  }
+  if (RequestContext->IrpSp->MajorFunction == IRP_MJ_CREATE) {
+    IoSetCancelRoutine(RequestContext->Irp, DokanCreateIrpCancelRoutine);
+  } else {
+    IoSetCancelRoutine(RequestContext->Irp, DokanIrpCancelRoutine);
+  }
+
+  if (RequestContext->Irp->Cancel) {
+    if (IoSetCancelRoutine(RequestContext->Irp, NULL) != NULL) {
       KeReleaseSpinLock(&IrpList->ListLock, oldIrql);
-
       DokanFreeIrpEntry(irpEntry);
-
       return STATUS_CANCELLED;
     }
   }
 
-  IoMarkIrpPending(Irp);
+  IoMarkIrpPending(RequestContext->Irp);
 
   InsertTailList(&IrpList->ListHead, &irpEntry->ListEntry);
 
   irpEntry->CancelRoutineFreeMemory = FALSE;
 
   // save the pointer in order to be accessed by cancel routine
-  Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_IRP_ENTRY] = irpEntry;
+  RequestContext->Irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_IRP_ENTRY] =
+      irpEntry;
 
   KeSetEvent(&IrpList->NotEmpty, IO_NO_INCREMENT, FALSE);
 
-  // DDbgPrint("  Release IrpList.ListLock\n");
   KeReleaseSpinLock(&IrpList->ListLock, oldIrql);
 
-  DDbgPrint("<== DokanRegisterPendingIrpMain\n");
   return STATUS_PENDING;
 }
 
 NTSTATUS
-DokanRegisterPendingIrp(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp,
-                        __in PEVENT_CONTEXT EventContext, __in ULONG Flags) {
-  PDokanVCB vcb = DeviceObject->DeviceExtension;
+DokanRegisterPendingIrp(__in PREQUEST_CONTEXT RequestContext,
+                        __in PEVENT_CONTEXT EventContext) {
   NTSTATUS status;
+  DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject, 0);
 
-  DDbgPrint("==> DokanRegisterPendingIrp\n");
+  DOKAN_LOG_FINE_IRP(RequestContext, "Register the IRP pending");
 
-  if (GetIdentifierType(vcb) != VCB) {
-    DDbgPrint("  IdentifierType is not VCB\n");
+  if (!RequestContext->Vcb) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "IdentifierType is not VCB");
     return STATUS_INVALID_PARAMETER;
   }
 
-  status = RegisterPendingIrpMain(DeviceObject, Irp, EventContext->SerialNumber,
-                                  &vcb->Dcb->PendingIrp, Flags, TRUE,
-                                  /*CurrentStatus=*/STATUS_SUCCESS);
+  // We check if we will have the space to sent the event before registering it
+  // to the pending IRPs. Write is an exception as it has a special workflow for
+  // large buffer that will request userland to allocate a specific buffer size
+  // that match it.
+  if (RequestContext->IrpSp->MajorFunction != IRP_MJ_WRITE &&
+      EventContext->Length > EVENT_CONTEXT_MAX_SIZE) {
+    InterlockedIncrement64((LONG64*)&RequestContext->Vcb->VolumeMetrics
+                               .LargeIRPRegistrationCanceled);
+    status = DokanLogError(&logger, STATUS_INVALID_PARAMETER,
+                           L"Received a too large buffer to handle for Major "
+                           L"IRP %xh, canceling it.",
+                           RequestContext->IrpSp->MajorFunction);
+  } else {
+    status = RegisterPendingIrpMain(RequestContext, EventContext,
+                                    &RequestContext->Dcb->PendingIrp, TRUE,
+                                    /*CurrentStatus=*/STATUS_SUCCESS);
+  }
 
   if (status == STATUS_PENDING) {
-    DokanEventNotification(&vcb->Dcb->NotifyEvent, EventContext);
+    DokanEventNotification(&RequestContext->Dcb->NotifyEvent, EventContext);
   } else {
     DokanFreeEventContext(EventContext);
   }
 
-  DDbgPrint("<== DokanRegisterPendingIrp\n");
+  DOKAN_LOG_FINE_IRP(RequestContext, "Pending Registration: %s", DokanGetNTSTATUSStr(status));
   return status;
 }
 
-VOID
-DokanRegisterPendingRetryIrp(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
-  PDokanVCB vcb = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(vcb) != VCB) {
+VOID DokanRegisterPendingRetryIrp(__in PREQUEST_CONTEXT RequestContext) {
+  if (!RequestContext->Vcb) {
     return;
   }
-  PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
-  if (irpSp->MajorFunction == IRP_MJ_CREATE) {
+  if (RequestContext->IrpSp->MajorFunction == IRP_MJ_CREATE) {
     // You can't just re-dispatch a create, since the part before the pending
     // retry has side-effects. DokanDispatchCreate uses this flag to identify
     // retries.
-    PDokanCCB ccb = irpSp->FileObject->FsContext2;
+    PDokanCCB ccb = RequestContext->IrpSp->FileObject->FsContext2;
     ASSERT(ccb != NULL);
     DokanCCBFlagsSetBit(ccb, DOKAN_RETRY_CREATE);
     OplockDebugRecordFlag(ccb->Fcb, DOKAN_OPLOCK_DEBUG_CREATE_RETRY_QUEUED);
   }
-  RegisterPendingIrpMain(DeviceObject, Irp, /*SerialNumber=*/0,
-                         &vcb->Dcb->PendingRetryIrp, /*Flags=*/0,
+  RegisterPendingIrpMain(RequestContext, /*EventContext=*/NULL,
+                         &RequestContext->Dcb->PendingRetryIrp,
                          /*CheckMount=*/TRUE,
                          /*CurrentStatus=*/STATUS_SUCCESS);
 }
 
-VOID
-DokanRegisterAsyncCreateFailure(__in PDEVICE_OBJECT DeviceObject,
-                                __in PIRP Irp,
-                                __in NTSTATUS Status) {
-  PDokanVCB vcb = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(vcb) != VCB) {
+VOID DokanRegisterAsyncCreateFailure(__in PREQUEST_CONTEXT RequestContext,
+                                     __in NTSTATUS Status) {
+  if (!RequestContext->Vcb) {
     return;
   }
-  RegisterPendingIrpMain(DeviceObject, Irp, /*SerialNumber=*/0,
-                         &vcb->Dcb->PendingIrp, /*Flags=*/0,
+  RegisterPendingIrpMain(RequestContext, /*EventContext=*/NULL,
+                         &RequestContext->Dcb->PendingIrp,
                          /*CheckMount=*/TRUE, Status);
-  KeSetEvent(&vcb->Dcb->ForceTimeoutEvent, 0, FALSE);
+  KeSetEvent(&RequestContext->Dcb->ForceTimeoutEvent, 0, FALSE);
 }
 
 NTSTATUS
-DokanRegisterPendingIrpForEvent(__in PDEVICE_OBJECT DeviceObject,
-                                _Inout_ PIRP Irp) {
-  PDokanVCB vcb = DeviceObject->DeviceExtension;
-
-  if (GetIdentifierType(vcb) != VCB) {
-    DDbgPrint("  IdentifierType is not VCB\n");
+DokanRegisterPendingIrpForEvent(__in PREQUEST_CONTEXT RequestContext) {
+  // TODO(adrienj): Remove the check when moving to FSCTL only.
+  if (RequestContext->Vcb == NULL) {
     return STATUS_INVALID_PARAMETER;
   }
 
-  if (IsUnmountPendingVcb(vcb)) {
-    DDbgPrint("  Volume is dismounted\n");
-    return STATUS_NO_SUCH_DEVICE;
-  }
-
   // DDbgPrint("DokanRegisterPendingIrpForEvent\n");
-  vcb->HasEventWait = TRUE;
+  RequestContext->Vcb->HasEventWait = TRUE;
 
-  return RegisterPendingIrpMain(DeviceObject, Irp,
-                                0, // SerialNumber
-                                &vcb->Dcb->PendingEvent,
-                                0, // Flags
+  return RegisterPendingIrpMain(RequestContext,
+                                NULL,  // EventContext
+                                &RequestContext->Dcb->PendingEvent,
                                 TRUE,
                                 /*CurrentStatus=*/STATUS_SUCCESS);
 }
 
 NTSTATUS
-DokanRegisterPendingIrpForService(__in PDEVICE_OBJECT DeviceObject,
-                                  _Inout_ PIRP Irp) {
-  PDOKAN_GLOBAL dokanGlobal;
-  DDbgPrint("DokanRegisterPendingIrpForService\n");
-
-  dokanGlobal = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(dokanGlobal) != DGL) {
+DokanRegisterPendingIrpForService(__in PREQUEST_CONTEXT RequestContext) {
+  if (!RequestContext->DokanGlobal) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "IdentifierType is not DGL");
     return STATUS_INVALID_PARAMETER;
   }
 
-  return RegisterPendingIrpMain(DeviceObject, Irp,
-                                0, // SerialNumber
-                                &dokanGlobal->PendingService,
-                                0, // Flags
+  return RegisterPendingIrpMain(RequestContext,
+                                NULL,  // EventContext
+                                &RequestContext->DokanGlobal->PendingService,
                                 FALSE,
                                 /*CurrentStatus=*/STATUS_SUCCESS);
+}
+
+void DokanDispatchCompletion(__in PDEVICE_OBJECT DeviceObject,
+                             __in PIRP_ENTRY irpEntry,
+                             __in PEVENT_INFORMATION eventInfo) {
+  DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, 0);
+
+  if (irpEntry->RequestContext.Irp == NULL) {
+    // this IRP is already canceled
+    ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
+    return;
+  }
+
+  if (IoSetCancelRoutine(irpEntry->RequestContext.Irp, NULL) == NULL) {
+    // Cancel routine will run as soon as we release the lock
+    InitializeListHead(&irpEntry->ListEntry);
+    irpEntry->CancelRoutineFreeMemory = TRUE;
+    return;
+  }
+
+  // IrpEntry is saved here for CancelRoutine
+  // Clear it to prevent to be completed by CancelRoutine twice
+  irpEntry->RequestContext.Irp->Tail.Overlay
+      .DriverContext[DRIVER_CONTEXT_IRP_ENTRY] = NULL;
+
+  DOKAN_LOG_BEGIN_MJ((&irpEntry->RequestContext));
+
+  if (eventInfo->Status == STATUS_PENDING) {
+    DokanLogError(&logger, /*Status=*/0,
+                  L"DLL returned STATUS_PENDING for IRP of type %d. "
+                  L"It should never return STATUS_PENDING for any IRP.",
+                  irpEntry->RequestContext.IrpSp->MajorFunction);
+  }
+
+  ASSERT(!irpEntry->RequestContext.DoNotComplete);
+
+  switch (irpEntry->RequestContext.IrpSp->MajorFunction) {
+  case IRP_MJ_DIRECTORY_CONTROL:
+    DokanCompleteDirectoryControl(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_READ:
+    DokanCompleteRead(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_WRITE:
+    DokanCompleteWrite(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_QUERY_INFORMATION:
+    DokanCompleteQueryInformation(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_QUERY_VOLUME_INFORMATION:
+    DokanCompleteQueryVolumeInformation(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_CREATE:
+    DokanCompleteCreate(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_CLEANUP:
+    DokanCompleteCleanup(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_LOCK_CONTROL:
+    DokanCompleteLock(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_SET_INFORMATION:
+    DokanCompleteSetInformation(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_FLUSH_BUFFERS:
+    DokanCompleteFlush(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_QUERY_SECURITY:
+    DokanCompleteQuerySecurity(&irpEntry->RequestContext, eventInfo);
+    break;
+  case IRP_MJ_SET_SECURITY:
+    DokanCompleteSetSecurity(&irpEntry->RequestContext, eventInfo);
+    break;
+  }
+
+  DOKAN_LOG_END_MJ((&irpEntry->RequestContext),
+                   irpEntry->RequestContext.Irp->IoStatus.Status);
+}
+
+ULONG
+GetEventInfoSize(__in ULONG MajorFunction, __in PEVENT_INFORMATION EventInfo) {
+  if (MajorFunction == IRP_MJ_WRITE) {
+    // For writes only, the reply is a fixed size and the BufferLength inside it
+    // is the "bytes written" value as opposed to the reply size.
+    return sizeof(EVENT_INFORMATION);
+  }
+  if (EventInfo->Status == STATUS_BUFFER_OVERFLOW) {
+    // For buffer overflow replies, the BufferLength is the needed length and
+    // not the used length. The caller needs to take precautions in case the
+    // used length is a value not specified in the struct.
+    return sizeof(EVENT_INFORMATION);
+  }
+  return max(sizeof(EVENT_INFORMATION),
+             sizeof(EVENT_INFORMATION) - sizeof(EventInfo->Buffer)
+                 + EventInfo->BufferLength);
 }
 
 // When user-mode file system application returns EventInformation,
 // search corresponding pending IRP and complete it
 NTSTATUS
-DokanCompleteIrp(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
+DokanCompleteIrp(__in PREQUEST_CONTEXT RequestContext) {
+  DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject, 0);
   KIRQL oldIrql;
+  NTSTATUS result = STATUS_SUCCESS;
   PLIST_ENTRY thisEntry, nextEntry, listHead;
   PIRP_ENTRY irpEntry;
-  PDokanVCB vcb;
-  PEVENT_INFORMATION eventInfo;
+  LIST_ENTRY completeList;
+  ULONG offset = 0;
+  ULONG eventInfoSize = 0;
+  ULONG lastSerialNumber = 0;
+  PEVENT_INFORMATION eventInfo = NULL;
+  BOOLEAN badUsageByCaller = FALSE;
+  ULONG bufferLength = 0;
+  PCHAR buffer = NULL;
 
-  eventInfo = (PEVENT_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-  ASSERT(eventInfo != NULL);
-
-  // DDbgPrint("==> DokanCompleteIrp [EventInfo #%X]\n",
-  // eventInfo->SerialNumber);
-
-  vcb = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(vcb) != VCB) {
-    return STATUS_INVALID_PARAMETER;
+  bufferLength =
+      RequestContext->IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+  if (bufferLength < sizeof(EVENT_INFORMATION)) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "Wrong input buffer length");
+    return STATUS_BUFFER_TOO_SMALL;
   }
 
-  if (IsUnmountPendingVcb(vcb)) {
-    DDbgPrint("      Volume is not mounted\n");
+  buffer = (PCHAR)RequestContext->Irp->AssociatedIrp.SystemBuffer;
+  ASSERT(buffer != NULL);
+
+  // TODO(adrienj): Remove the check when moving to FSCTL only.
+  if (RequestContext->Vcb == NULL) {
+    return STATUS_INVALID_PARAMETER;
+  }
+  if (IsUnmountPendingVcb(RequestContext->Vcb)) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "Volume is not mounted");
     return STATUS_NO_SUCH_DEVICE;
   }
 
-  // DDbgPrint("      Lock IrpList.ListLock\n");
+  InitializeListHead(&completeList);
+
   ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
-  KeAcquireSpinLock(&vcb->Dcb->PendingIrp.ListLock, &oldIrql);
+  KeAcquireSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, &oldIrql);
 
   // search corresponding IRP through pending IRP list
-  listHead = &vcb->Dcb->PendingIrp.ListHead;
-
+  listHead = &RequestContext->Dcb->PendingIrp.ListHead;
   for (thisEntry = listHead->Flink; thisEntry != listHead;
        thisEntry = nextEntry) {
-
-    PIRP irp;
-    PIO_STACK_LOCATION irpSp;
-
     nextEntry = thisEntry->Flink;
-
     irpEntry = CONTAINING_RECORD(thisEntry, IRP_ENTRY, ListEntry);
-
-    // check whether this is corresponding IRP
-
-    // DDbgPrint("SerialNumber irpEntry %X eventInfo %X\n",
-    // irpEntry->SerialNumber, eventInfo->SerialNumber);
-
-    // this irpEntry must be freed in this if statement
+    eventInfo = (PEVENT_INFORMATION)(buffer + offset);
+    if (eventInfo->SerialNumber < lastSerialNumber) {
+      // This would be a coding error in the DLL.
+      result = DokanLogError(&logger,
+                             STATUS_INVALID_PARAMETER,
+                             L"Reply batch not sorted by serial number.");
+      badUsageByCaller = TRUE;
+      break;
+    }
+    lastSerialNumber = eventInfo->SerialNumber;
     if (irpEntry->SerialNumber != eventInfo->SerialNumber) {
       continue;
     }
-
     RemoveEntryList(thisEntry);
-
-    irp = irpEntry->Irp;
-
-    if (irp == NULL) {
-      // this IRP is already canceled
-      ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
-      DokanFreeIrpEntry(irpEntry);
-      irpEntry = NULL;
+    InsertTailList(&completeList, thisEntry);
+    offset += GetEventInfoSize(irpEntry->RequestContext.IrpSp->MajorFunction,
+                               eventInfo);
+    // Everything through offset - 1 must be readable by the completion function
+    // that receives the EVENT_INFORMATION object.
+    if (offset > bufferLength) {
+      result = DokanLogError(
+          &logger,
+          STATUS_INVALID_PARAMETER,
+          L"Full EVENT_INFORMATION size too large for passed-in buffer.");
+      badUsageByCaller = TRUE;
       break;
     }
-
-    if (IoSetCancelRoutine(irp, NULL) == NULL) {
-      // Cancel routine will run as soon as we release the lock
-      InitializeListHead(&irpEntry->ListEntry);
-      irpEntry->CancelRoutineFreeMemory = TRUE;
+    // Batching is currently not allowed for buffer overflow replies, and the
+    // checks below don't work for them. Essentially, if user mode populated a
+    // partial object, it has no way of indicating the real size of that
+    // EVENT_INFORMATION object, other than the size passed to DeviceIoControl
+    // externally to the buffer.
+    if (eventInfo->Status == STATUS_BUFFER_OVERFLOW) {
       break;
     }
-
-    // IRP is not canceled yet
-    irpSp = irpEntry->IrpSp;
-
-    ASSERT(irpSp != NULL);
-
-    // IrpEntry is saved here for CancelRoutine
-    // Clear it to prevent to be completed by CancelRoutine twice
-    irp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_IRP_ENTRY] = NULL;
-    KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
-
-    if (IsUnmountPendingVcb(vcb)) {
-      DDbgPrint("      Volume is not mounted second check\n");
+    // Don't loop if batching is not enabled; there should only be one reply at
+    // a time in that case.
+    if (!RequestContext->Dcb->AllowIpcBatching) {
+      if (offset < bufferLength) {
+        result = DokanLogError(
+            &logger,
+            STATUS_INVALID_PARAMETER,
+            L"Unexpected batch reply with batching flagged off.");
+        badUsageByCaller = TRUE;
+      }
+      break;
+    }
+    // Don't loop if this is the last reply in the batch.
+    if (offset == bufferLength) {
+      break;
+    }
+    // Don't loop if the next thing in the batch is a fragment of an
+    // EVENT_INFORMATION object.
+    if (offset + sizeof(EVENT_INFORMATION) > bufferLength) {
+      DokanLogInfo(&logger, L"Wrong input buffer length.");
+      badUsageByCaller = TRUE;
+      break;
+    }
+  }
+  KeReleaseSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, oldIrql);
+  offset = 0;
+  eventInfo = NULL;
+  if (IsListEmpty(&completeList)) {
+    DokanLogInfo(&logger, L"Warning: no matching IRPs found for reply.");
+  }
+  while (!IsListEmpty(&completeList)) {
+    listHead = RemoveHeadList(&completeList);
+    if (IsUnmountPendingVcb(RequestContext->Vcb)) {
+      DOKAN_LOG_FINE_IRP(RequestContext, "Volume is not mounted second check");
       return STATUS_NO_SUCH_DEVICE;
     }
-
-    if (eventInfo->Status == STATUS_PENDING) {
-      DDbgPrint(
-          "      !!WARNING!! Do not return STATUS_PENDING DokanCompleteIrp!");
+    irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
+    if (offset >= bufferLength) {
+      DokanLogInfo(&logger, L"Unexpected end of event info list.");
+      irpEntry->RequestContext.Irp->IoStatus.Information = 0;
+      DokanCompleteIrpRequest(irpEntry->RequestContext.Irp, STATUS_CANCELLED);
+    } else {
+      eventInfo = (PEVENT_INFORMATION)(buffer + offset);
+      eventInfoSize = GetEventInfoSize(
+          irpEntry->RequestContext.IrpSp->MajorFunction,
+                                       eventInfo);
+      DokanDispatchCompletion(RequestContext->DeviceObject, irpEntry, eventInfo);
+      offset += eventInfoSize;
     }
-
-    switch (irpSp->MajorFunction) {
-    case IRP_MJ_DIRECTORY_CONTROL:
-      DokanCompleteDirectoryControl(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_READ:
-      DokanCompleteRead(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_WRITE:
-      DokanCompleteWrite(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_QUERY_INFORMATION:
-      DokanCompleteQueryInformation(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_QUERY_VOLUME_INFORMATION:
-      DokanCompleteQueryVolumeInformation(irpEntry, eventInfo, DeviceObject);
-      break;
-    case IRP_MJ_CREATE:
-      DokanCompleteCreate(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_CLEANUP:
-      DokanCompleteCleanup(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_LOCK_CONTROL:
-      DokanCompleteLock(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_SET_INFORMATION:
-      DokanCompleteSetInformation(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_FLUSH_BUFFERS:
-      DokanCompleteFlush(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_QUERY_SECURITY:
-      DokanCompleteQuerySecurity(irpEntry, eventInfo);
-      break;
-    case IRP_MJ_SET_SECURITY:
-      DokanCompleteSetSecurity(irpEntry, eventInfo);
-      break;
-    default:
-      DDbgPrint("Unknown IRP %d\n", irpSp->MajorFunction);
-      // TODO: in this case, should complete this IRP
-      break;
-    }
-
     DokanFreeIrpEntry(irpEntry);
     irpEntry = NULL;
-
-    return STATUS_SUCCESS;
   }
-
-  KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
-
-  // DDbgPrint("<== AACompleteIrp [EventInfo #%X]\n", eventInfo->SerialNumber);
-
-  // TODO: should return error
-  return STATUS_SUCCESS;
+  if (badUsageByCaller) {
+    // This flag should only be set if there is a coding error in the DLL.
+    DokanLogInfo(
+        &logger,
+        L"Unmounting to avoid hanging requests due to incorrect usage.");
+    DokanUnmount(RequestContext, RequestContext->Dcb);
+  }
+  return result;
 }
 
 // Gets the binary owner information from the security descriptor of the device.
@@ -535,15 +636,17 @@ char* GetDeviceOwner(__in PDOKAN_LOGGER Logger,
     if (status != STATUS_BUFFER_TOO_SMALL) {
       DokanLogInfo(Logger,
                    L"Failed to query for owner length of device: %s,"
-                   L" status: 0x%x", DeviceNameForLog, status);
+                   L" status: 0x%x",
+                   DeviceNameForLog, status);
       __leave;
     }
-    result = ExAllocatePool(*OwnerSize);
+    result = DokanAlloc(*OwnerSize);
     status = ZwQuerySecurityObject(handle, OWNER_SECURITY_INFORMATION, result,
                                    *OwnerSize, OwnerSize);
     if (!NT_SUCCESS(status)) {
       DokanLogInfo(Logger, L"Failed to query for owner of device: %s,"
-                   L" status: 0x%x", DeviceNameForLog, status);
+                   L" status: 0x%x",
+                   DeviceNameForLog, status);
       ExFreePool(result);
       result = NULL;
       __leave;
@@ -598,7 +701,8 @@ BOOLEAN HasSameOwner(__in PDOKAN_LOGGER Logger,
 // it with the one indicated by NewControl. If this cannot be done due to
 // different ownership, or mysteriously fails, returns FALSE; otherwise returns
 // TRUE.
-BOOLEAN MaybeUnmountOldDrive(__in PDOKAN_LOGGER Logger,
+BOOLEAN MaybeUnmountOldDrive(__in PREQUEST_CONTEXT RequestContext,
+                             __in PDOKAN_LOGGER Logger,
                              __in PDOKAN_GLOBAL DokanGlobal,
                              __in PDOKAN_CONTROL OldControl,
                              __in PDOKAN_CONTROL NewControl) {
@@ -613,7 +717,7 @@ BOOLEAN MaybeUnmountOldDrive(__in PDOKAN_LOGGER Logger,
     return FALSE;
   }
   DokanLogInfo(Logger, L"Unmounting the existing drive.");
-  DokanUnmount(OldControl->Dcb);
+  DokanUnmount(RequestContext, OldControl->Dcb);
   PMOUNT_ENTRY entryAfterUnmount =
       FindMountEntry(DokanGlobal, NewControl, FALSE);
   if (entryAfterUnmount != NULL) {
@@ -628,13 +732,10 @@ BOOLEAN MaybeUnmountOldDrive(__in PDOKAN_LOGGER Logger,
 
 // start event dispatching
 NTSTATUS
-DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
+DokanEventStart(__in PREQUEST_CONTEXT RequestContext) {
   ULONG outBufferLen;
-  ULONG inBufferLen;
-  PIO_STACK_LOCATION irpSp = NULL;
   PEVENT_START eventStart = NULL;
   PEVENT_DRIVER_INFO driverInfo = NULL;
-  PDOKAN_GLOBAL dokanGlobal = NULL;
   PDokanDCB dcb = NULL;
   NTSTATUS status;
   DEVICE_TYPE deviceType;
@@ -647,48 +748,61 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   BOOLEAN fileLockUserMode = FALSE;
   BOOLEAN lockDebugEnabled = FALSE;
   PSECURITY_DESCRIPTOR volumeSecurityDescriptor = NULL;
-  DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, 0);
+  BOOLEAN startFailure = FALSE;
+  BOOLEAN isMountPointDriveLetter = FALSE;
+
+  DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject, 0);
 
   DokanLogInfo(&logger, L"Entered event start.");
+  DOKAN_LOG_FINE_IRP(RequestContext, "Event start");
 
-  dokanGlobal = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(dokanGlobal) != DGL) {
-    return STATUS_INVALID_PARAMETER;
+  // We just use eventStart variable for his type size calculation here
+  GET_IRP_BUFFER(RequestContext->Irp, eventStart);
+
+  outBufferLen =
+      RequestContext->IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+  if (outBufferLen != sizeof(EVENT_DRIVER_INFO) || !eventStart) {
+    return DokanLogError(
+        &logger, STATUS_INSUFFICIENT_RESOURCES,
+        L"Buffer IN/OUT received do not match the expected size.");
   }
 
-  irpSp = IoGetCurrentIrpStackLocation(Irp);
-
-  outBufferLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
-  inBufferLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;
-
-  eventStart = ExAllocatePool(sizeof(EVENT_START));
-  baseGuidString = ExAllocatePool(64 * sizeof(WCHAR));
-
-  if (outBufferLen != sizeof(EVENT_DRIVER_INFO) ||
-      inBufferLen != sizeof(EVENT_START) || eventStart == NULL ||
-      baseGuidString == NULL) {
-    if (eventStart) {
+  eventStart = DokanAlloc(sizeof(EVENT_START));
+  baseGuidString = DokanAllocZero(64 * sizeof(WCHAR));
+  if (eventStart == NULL || baseGuidString == NULL) {
+    if (eventStart)
       ExFreePool(eventStart);
-    }
-    if (baseGuidString) {
+    if (baseGuidString)
       ExFreePool(baseGuidString);
-    }
     return DokanLogError(&logger, STATUS_INSUFFICIENT_RESOURCES,
                          L"Failed to allocate buffers in event start.");
   }
 
-  RtlCopyMemory(eventStart, Irp->AssociatedIrp.SystemBuffer,
+  RtlCopyMemory(eventStart, RequestContext->Irp->AssociatedIrp.SystemBuffer,
                 sizeof(EVENT_START));
-  driverInfo = Irp->AssociatedIrp.SystemBuffer;
-  driverInfo->Flags = 0;
   GUID baseGuid = eventStart->BaseVolumeGuid;
   GUID dokanDriverVersion = DOKAN_DRIVER_VERSION;
   if (!IsEqualGUID(&eventStart->UserVersion, &dokanDriverVersion)) {
     DokanLogInfo(&logger, L"Driver version check in event start failed.");
+    startFailure = TRUE;
+  }
+
+  if (DokanSearchStringChar(eventStart->MountPoint,
+                        sizeof(eventStart->MountPoint), '\0') == -1 ||
+      DokanSearchStringChar(eventStart->UNCName,
+                        sizeof(eventStart->UNCName), '\0') == -1) {
+    DokanLogInfo(&logger, L"MountPoint / UNCName provided are not null "
+                          L"terminated in event start.");
+    startFailure = TRUE;
+  }
+
+  driverInfo = RequestContext->Irp->AssociatedIrp.SystemBuffer;
+  driverInfo->Flags = 0;
+  if (startFailure) {
     driverInfo->DriverVersion = dokanDriverVersion;
     driverInfo->Status = DOKAN_START_FAILED;
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
+    RequestContext->Irp->IoStatus.Status = STATUS_SUCCESS;
+    RequestContext->Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
     return STATUS_SUCCESS;
@@ -703,32 +817,32 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     deviceCharacteristics |= FILE_REMOTE_DEVICE;
     break;
   default:
-    DDbgPrint("  Unknown device type: %d\n", eventStart->DeviceType);
+    DOKAN_LOG_FINE_IRP(RequestContext, "Unknown device type: %d", eventStart->DeviceType);
     deviceType = FILE_DEVICE_DISK_FILE_SYSTEM;
   }
 
   if (eventStart->Flags & DOKAN_EVENT_REMOVABLE) {
-    DDbgPrint("  DeviceCharacteristics |= FILE_REMOVABLE_MEDIA\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "DeviceCharacteristics |= FILE_REMOVABLE_MEDIA");
     deviceCharacteristics |= FILE_REMOVABLE_MEDIA;
   }
 
   if (eventStart->Flags & DOKAN_EVENT_WRITE_PROTECT) {
-    DDbgPrint("  DeviceCharacteristics |= FILE_READ_ONLY_DEVICE\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "DeviceCharacteristics |= FILE_READ_ONLY_DEVICE");
     deviceCharacteristics |= FILE_READ_ONLY_DEVICE;
   }
 
   if (eventStart->Flags & DOKAN_EVENT_MOUNT_MANAGER) {
-    DDbgPrint("  Using Mount Manager\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "Using Mount Manager");
     useMountManager = TRUE;
   }
 
   if (eventStart->Flags & DOKAN_EVENT_CURRENT_SESSION) {
-    DDbgPrint("  Mounting on current session only\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "Mounting on current session only");
     mountGlobally = FALSE;
   }
 
   if (eventStart->Flags & DOKAN_EVENT_FILELOCK_USER_MODE) {
-    DDbgPrint("  FileLock in User Mode\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "FileLock in User Mode");
     fileLockUserMode = TRUE;
   }
 
@@ -736,15 +850,15 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     DokanLogInfo(
         &logger,
         L"Enabling lock debugging. This should be disabled in normal use.");
-    DDbgPrint("  Lock debugging enabled\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "Lock debugging enabled");
     lockDebugEnabled = TRUE;
   }
 
   KeEnterCriticalRegion();
-  ExAcquireResourceExclusiveLite(&dokanGlobal->Resource, TRUE);
+  ExAcquireResourceExclusiveLite(&RequestContext->DokanGlobal->Resource, TRUE);
 
   DOKAN_CONTROL dokanControl;
-  RtlZeroMemory(&dokanControl, sizeof(dokanControl));
+  RtlZeroMemory(&dokanControl, sizeof(DOKAN_CONTROL));
   RtlStringCchCopyW(dokanControl.MountPoint, MAXIMUM_FILENAME_LENGTH,
                     L"\\DosDevices\\");
   if (wcslen(eventStart->MountPoint) == 1) {
@@ -756,8 +870,9 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
                      eventStart->MountPoint);
   }
 
-  DDbgPrint("  Checking for MountPoint %ls \n", dokanControl.MountPoint);
-  PMOUNT_ENTRY foundEntry = FindMountEntry(dokanGlobal, &dokanControl, FALSE);
+  DOKAN_LOG_FINE_IRP(RequestContext, "Checking for MountPoint %ls", dokanControl.MountPoint);
+  PMOUNT_ENTRY foundEntry =
+      FindMountEntry(RequestContext->DokanGlobal, &dokanControl, FALSE);
   if (foundEntry != NULL &&
       !(eventStart->Flags & DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS)) {
     // Legacy behavior: fail on existing mount entry with the same mount point.
@@ -771,48 +886,50 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
         dokanControl.MountPoint);
     driverInfo->DriverVersion = dokanDriverVersion;
     driverInfo->Status = DOKAN_START_FAILED;
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
-    ExReleaseResourceLite(&dokanGlobal->Resource);
+    RequestContext->Irp->IoStatus.Status = STATUS_SUCCESS;
+    RequestContext->Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
+    ExReleaseResourceLite(&RequestContext->DokanGlobal->Resource);
     KeLeaveCriticalRegion();
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
     return STATUS_SUCCESS;
   }
 
-  baseGuid.Data2 = (USHORT)(dokanGlobal->MountId & 0xFFFF) ^ baseGuid.Data2;
-  baseGuid.Data3 = (USHORT)(dokanGlobal->MountId >> 16) ^ baseGuid.Data3;
+  baseGuid.Data2 =
+      (USHORT)(RequestContext->DokanGlobal->MountId & 0xFFFF) ^ baseGuid.Data2;
+  baseGuid.Data3 =
+      (USHORT)(RequestContext->DokanGlobal->MountId >> 16) ^ baseGuid.Data3;
 
   status = RtlStringFromGUID(&baseGuid, &unicodeGuid);
   if (!NT_SUCCESS(status)) {
-    ExReleaseResourceLite(&dokanGlobal->Resource);
+    ExReleaseResourceLite(&RequestContext->DokanGlobal->Resource);
     KeLeaveCriticalRegion();
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
     return DokanLogError(&logger, status, L"Failed to convert GUID to string.");
   }
-  RtlZeroMemory(baseGuidString, 64 * sizeof(WCHAR));
-  RtlStringCchCopyW(baseGuidString, 64,
-                    unicodeGuid.Buffer);
+
+  RtlStringCchCopyW(baseGuidString, 64, unicodeGuid.Buffer);
   RtlFreeUnicodeString(&unicodeGuid);
 
-  InterlockedIncrement((LONG *)&dokanGlobal->MountId);
+  InterlockedIncrement((LONG*)&RequestContext->DokanGlobal->MountId);
 
   if (eventStart->VolumeSecurityDescriptorLength != 0) {
-    DDbgPrint("Using volume security descriptor of length %d\n",
+    DOKAN_LOG_FINE_IRP(RequestContext, "Using volume security descriptor of length %d",
         eventStart->VolumeSecurityDescriptorLength);
     deviceCharacteristics |= FILE_DEVICE_SECURE_OPEN;
     volumeSecurityDescriptor = eventStart->VolumeSecurityDescriptor;
   }
 
   status = DokanCreateDiskDevice(
-      DeviceObject->DriverObject, dokanGlobal->MountId, eventStart->MountPoint,
+      RequestContext->DeviceObject->DriverObject,
+      RequestContext->DokanGlobal->MountId, eventStart->MountPoint,
       eventStart->UNCName, volumeSecurityDescriptor, baseGuidString,
-      dokanGlobal, deviceType, deviceCharacteristics, mountGlobally,
-      useMountManager, &dokanControl);
+      RequestContext->DokanGlobal, deviceType, deviceCharacteristics,
+      mountGlobally, useMountManager, &dokanControl);
 
   if (!NT_SUCCESS(status)) {
-    ExReleaseResourceLite(&dokanGlobal->Resource);
+    ExReleaseResourceLite(&RequestContext->DokanGlobal->Resource);
     KeLeaveCriticalRegion();
     ExFreePool(eventStart);
     ExFreePool(baseGuidString);
@@ -820,25 +937,21 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   }
 
   dcb = dokanControl.Dcb;
-  dcb->EnableOplocks = (eventStart->Flags & DOKAN_EVENT_ENABLE_OPLOCKS) != 0;
   dcb->LogOplocks = (eventStart->Flags & DOKAN_EVENT_LOG_OPLOCKS) != 0;
-  dcb->SuppressFileNameInEventContext =
-      (eventStart->Flags & DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT)
-      != 0;
+  dcb->DispatchDriverLogs =
+      (eventStart->Flags & DOKAN_EVENT_DISPATCH_DRIVER_LOGS) != 0;
+  dcb->AllowIpcBatching =
+      (eventStart->Flags & DOKAN_EVENT_ALLOW_IPC_BATCHING) != 0;
   dcb->AssumePagingIoIsLocked =
       (eventStart->Flags & DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED) != 0;
-  if (dcb->AssumePagingIoIsLocked && !dcb->SuppressFileNameInEventContext) {
-    DokanLogInfo(
-        &logger,
-        L"Warning: DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED is supposed to"
-        L" augment DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT, which"
-        L" has not been set for this drive.");
-  }
-  dcb->OptimizeSingleNameSearch =
-      (eventStart->Flags & DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH) != 0;
   dcb->DispatchNonRootOpensBeforeEventWait =
       (eventStart->Flags &
           DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT) != 0;
+  isMountPointDriveLetter = IsMountPointDriveLetter(dcb->MountPoint);
+
+  if (dcb->DispatchDriverLogs) {
+    IncrementVcbLogCacheCount();
+  }
 
   // This has 2 effects that differ from legacy behavior: (1) try to get rid of
   // the occupied drive, if it's a dokan drive owned by the same user; (2) have
@@ -852,8 +965,9 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
       (eventStart->Flags & DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS) != 0;
   if (dcb->ResolveMountConflicts) {
     if (foundEntry != NULL) {
-      if (MaybeUnmountOldDrive(&logger, dokanGlobal, &foundEntry->MountControl,
-                               &dokanControl)) {
+      if (MaybeUnmountOldDrive(RequestContext, &logger,
+                               RequestContext->DokanGlobal,
+                               &foundEntry->MountControl, &dokanControl)) {
         driverInfo->Flags |= DOKAN_DRIVER_INFO_OLD_DRIVE_UNMOUNTED;
       } else {
         driverInfo->Flags |= DOKAN_DRIVER_INFO_OLD_DRIVE_LEFT_MOUNTED;
@@ -871,11 +985,15 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
           L" another driver.");
       dcb->ForceDriveLetterAutoAssignment = TRUE;
     }
+    if (!isMountPointDriveLetter) {
+      dcb->ForceDriveLetterAutoAssignment = FALSE;
+    }
   }
   if (dcb->ForceDriveLetterAutoAssignment) {
     driverInfo->Flags |= DOKAN_DRIVER_INFO_AUTO_ASSIGN_REQUESTED;
   }
-  PMOUNT_ENTRY mountEntry = InsertMountEntry(dokanGlobal, &dokanControl, FALSE);
+  PMOUNT_ENTRY mountEntry =
+      InsertMountEntry(RequestContext->DokanGlobal, &dokanControl, FALSE);
   if (mountEntry != NULL) {
     DokanLogInfo(&logger, L"Inserted new mount entry.");
   } else {
@@ -885,8 +1003,8 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
 
   dcb->FileLockInUserMode = fileLockUserMode;
   dcb->LockDebugEnabled = lockDebugEnabled;
-  driverInfo->DeviceNumber = dokanGlobal->MountId;
-  driverInfo->MountId = dokanGlobal->MountId;
+  driverInfo->DeviceNumber = RequestContext->DokanGlobal->MountId;
+  driverInfo->MountId = RequestContext->DokanGlobal->MountId;
   driverInfo->Status = DOKAN_MOUNTED;
   driverInfo->DriverVersion = dokanDriverVersion;
 
@@ -915,99 +1033,134 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     }
     dcb->IrpTimeout = eventStart->IrpTimeout;
   }
+  dcb->FcbGarbageCollectionIntervalMs =
+      eventStart->FcbGarbageCollectionIntervalMs;
+  // Sanitize the garbage collection parameter.
+  if (dcb->FcbGarbageCollectionIntervalMs > 0) {
+    if (dcb->FcbGarbageCollectionIntervalMs
+        < MIN_FCB_GARBAGE_COLLECTION_INTERVAL) {
+      DokanLogInfo(&logger, L"Not using FCB garbage collection because the"
+                   L" specified interval of %lu is too low to be useful.",
+                   dcb->FcbGarbageCollectionIntervalMs);
+      dcb->FcbGarbageCollectionIntervalMs = 0;
+    }
+  }
 
   DokanLogInfo(&logger, L"Event start using mount ID: %d; device name: %s.",
                dcb->MountId, driverInfo->DeviceName);
 
   dcb->UseAltStream = 0;
   if (eventStart->Flags & DOKAN_EVENT_ALTERNATIVE_STREAM_ON) {
-    DDbgPrint("  ALT_STREAM_ON\n");
+    DOKAN_LOG_FINE_IRP(RequestContext, "ALT_STREAM_ON");
     dcb->UseAltStream = 1;
   }
 
   DokanStartEventNotificationThread(dcb);
 
-  ExReleaseResourceLite(&dokanGlobal->Resource);
+  ExReleaseResourceLite(&RequestContext->DokanGlobal->Resource);
   KeLeaveCriticalRegion();
 
   IoVerifyVolume(dcb->DeviceObject, FALSE);
-  // The mount entry now has the actual mount point, because IoVerifyVolume
-  // re-entrantly invokes DokanMountVolume, which calls DokanCreateMountPoint,
-  // which re-entrantly issues IOCTL_MOUNTDEV_LINK_CREATED, and that updates the
-  // mount entry. We now copy the actual drive letter to the returned info. We
-  // expect it to be in the form \DosDevices\G:. If it's a directory mount
-  // point, this value is unused by the library.
-  if (dcb->ResolveMountConflicts) {
-    if (!dcb->MountPointDetermined) {
-      // Getting into this block is considered very rare, and we are not even
-      // sure how to achieve it naturally. It can be triggered artificially by
-      // adding an applicable deleted volume record under
-      // HKLM\System\MountedDevices. We don't create such records automatically
-      // when ResolveMountConflicts is true. When it is false, we create them
-      // with the legacy DOKAN_BASE_GUID, so those records should be ignored.
-      DokanLogError(
-          &logger, 0, L"Warning: mount point creation is being forced.");
-      driverInfo->Flags |= DOKAN_DRIVER_INFO_MOUNT_FORCED;
-      DokanCreateMountPoint(dcb);
+
+  if (useMountManager) {
+    // The mount entry now has the actual mount point, because IoVerifyVolume
+    // re-entrantly invokes DokanMountVolume, which calls DokanCreateMountPoint,
+    // which re-entrantly issues IOCTL_MOUNTDEV_LINK_CREATED, and that updates
+    // the mount entry. We now copy the actual drive letter to the returned
+    // info. We expect it to be in the form \DosDevices\G:. If it's a directory
+    // mount point, this value is unused by the library.
+    if (isMountPointDriveLetter && dcb->ResolveMountConflicts) {
       if (!dcb->MountPointDetermined) {
-        // This is not believed to be possible. We have historical evidence that
-        // DokanCreateMountPoint always works, but we don't have proof that it
-        // always updates MountPointDetermined synchronously, so we still report
-        // success in this case.
-        driverInfo->Flags |= DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED;
-        DokanLogError(
-            &logger, 0, L"Mount point was still not assigned after forcing.");
+        // Getting into this block is considered very rare, and we are not
+        // even sure how to achieve it naturally. It can be triggered
+        // artificially by adding an applicable deleted volume record under
+        // HKLM\System\MountedDevices. We don't create such records
+        // automatically when ResolveMountConflicts is true. When it is false,
+        // we create them with the legacy DOKAN_BASE_GUID, so those records
+        // should be ignored.
+        DokanLogError(&logger, 0,
+                      L"Warning: mount point creation is being forced.");
+        driverInfo->Flags |= DOKAN_DRIVER_INFO_MOUNT_FORCED;
+        DokanCreateMountPoint(dcb);
+        if (!dcb->MountPointDetermined) {
+          // This is not believed to be possible. We have historical evidence
+          // that DokanCreateMountPoint always works, but we don't have proof
+          // that it always updates MountPointDetermined synchronously, so we
+          // still report success in this case.
+          driverInfo->Flags |= DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED;
+          DokanLogError(&logger, 0,
+                        L"Mount point was still not assigned after forcing.");
+        }
+      }
+      if (RtlCompareMemory(mountEntry->MountControl.MountPoint,
+                           L"\\DosDevices\\", 24) == 24) {
+        driverInfo->ActualDriveLetter = mountEntry->MountControl.MountPoint[12];
+        DokanLogInfo(&logger, L"Returning actual mount point %c",
+                     driverInfo->ActualDriveLetter);
+      } else {
+        DokanLogInfo(
+            &logger,
+            L"Warning: actual mount point %s does not have expected prefix.",
+            mountEntry->MountControl.MountPoint);
+      }
+    } else if (!isMountPointDriveLetter && dcb->PersistentSymbolicLinkName) {
+      // Set our existing directory path as reparse point.
+      // It needs to be done outside IoVerifyVolume/DokanMountVolume as the
+      // MountManager will also call IoVerifyVolume on the device which will
+      // lead on a deadlock while trying to acquire the MountManager database.
+      ULONG setReparseInputlength = 0;
+      PCHAR setReparseInput = CreateSetReparsePointRequest(
+          RequestContext, dcb->PersistentSymbolicLinkName,
+          &setReparseInputlength);
+      if (setReparseInput) {
+        status = SendDirectoryFsctl(RequestContext, dcb->MountPoint,
+                                    FSCTL_SET_REPARSE_POINT, setReparseInput,
+                                    setReparseInputlength);
+        ExFreePool(setReparseInput);
+        if (NT_SUCCESS(status)) {
+          // Inform MountManager of the new mount point.
+          NotifyDirectoryMountPointCreated(dcb);
+        } else {
+          DokanLogError(&logger, status,
+                        L"Failed to set reparse point on MountPoint \"%wZ\"",
+                        dcb->MountPoint);
+        }
       }
     }
-    if (RtlCompareMemory(mountEntry->MountControl.MountPoint,
-                         L"\\DosDevices\\", 24) == 24) {
-      driverInfo->ActualDriveLetter = mountEntry->MountControl.MountPoint[12];
-      DokanLogInfo(&logger, L"Returning actual mount point %c",
-                   driverInfo->ActualDriveLetter);
-    } else {
-      DokanLogInfo(
-          &logger,
-          L"Warning: actual mount point %s does not have expected prefix.",
-          mountEntry->MountControl.MountPoint);
-    }
   }
-  Irp->IoStatus.Status = STATUS_SUCCESS;
-  Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
+
+  RequestContext->Irp->IoStatus.Status = STATUS_SUCCESS;
+  RequestContext->Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
+
   ExFreePool(eventStart);
   ExFreePool(baseGuidString);
 
   DokanLogInfo(&logger, L"Finished event start successfully with flags: %I32x",
                driverInfo->Flags);
 
-  return Irp->IoStatus.Status;
+  DOKAN_LOG_FINE_IRP(RequestContext, "Finished event start successfully with flags: %I32x",
+                driverInfo->Flags);
+  return RequestContext->Irp->IoStatus.Status;
 }
 
 // user assinged bigger buffer that is enough to return WriteEventContext
 NTSTATUS
-DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
+DokanEventWrite(__in PREQUEST_CONTEXT RequestContext) {
   KIRQL oldIrql;
   PLIST_ENTRY thisEntry, nextEntry, listHead;
   PIRP_ENTRY irpEntry;
-  PDokanVCB vcb;
-  PEVENT_INFORMATION eventInfo;
+  PEVENT_INFORMATION eventInfo = NULL;
   PIRP writeIrp;
 
-  eventInfo = (PEVENT_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-  ASSERT(eventInfo != NULL);
+  GET_IRP_BUFFER_OR_RETURN(RequestContext->Irp, eventInfo);
 
-  DDbgPrint("==> DokanEventWrite [EventInfo #%X]\n", eventInfo->SerialNumber);
-
-  vcb = DeviceObject->DeviceExtension;
-
-  if (GetIdentifierType(vcb) != VCB) {
-    return STATUS_INVALID_PARAMETER;
-  }
+  DOKAN_LOG_FINE_IRP(RequestContext, "EventInfo #%X", eventInfo->SerialNumber);
 
   ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
-  KeAcquireSpinLock(&vcb->Dcb->PendingIrp.ListLock, &oldIrql);
+  KeAcquireSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, &oldIrql);
 
   // search corresponding write IRP through pending IRP list
-  listHead = &vcb->Dcb->PendingIrp.ListHead;
+  listHead = &RequestContext->Dcb->PendingIrp.ListHead;
 
   for (thisEntry = listHead->Flink; thisEntry != listHead;
        thisEntry = nextEntry) {
@@ -1030,7 +1183,7 @@ DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     }
 
     // do NOT free irpEntry here
-    writeIrp = irpEntry->Irp;
+    writeIrp = irpEntry->RequestContext.Irp;
     if (writeIrp == NULL) {
       // this IRP has already been canceled
       ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
@@ -1046,8 +1199,8 @@ DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
       continue;
     }
 
-    writeIrpSp = irpEntry->IrpSp;
-    eventIrpSp = IoGetCurrentIrpStackLocation(Irp);
+    writeIrpSp = irpEntry->RequestContext.IrpSp;
+    eventIrpSp = IoGetCurrentIrpStackLocation(RequestContext->Irp);
 
     ASSERT(writeIrpSp != NULL);
     ASSERT(eventIrpSp != NULL);
@@ -1060,19 +1213,24 @@ DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     // short of buffer length
     if (eventIrpSp->Parameters.DeviceIoControl.OutputBufferLength <
         eventContext->Length) {
-      DDbgPrint("  EventWrite: STATUS_INSUFFICIENT_RESOURCE\n");
+      DOKAN_LOG_FINE_IRP(RequestContext, "EventWrite: Buffer too small");
       status = STATUS_INSUFFICIENT_RESOURCES;
     } else {
       PVOID buffer;
       // DDbgPrint("  EventWrite CopyMemory\n");
       // DDbgPrint("  EventLength %d, BufLength %d\n", eventContext->Length,
       //            eventIrpSp->Parameters.DeviceIoControl.OutputBufferLength);
-      if (Irp->MdlAddress)
-        buffer = MmGetSystemAddressForMdlNormalSafe(Irp->MdlAddress);
+      if (RequestContext->Irp->MdlAddress)
+        buffer =
+            MmGetSystemAddressForMdlNormalSafe(RequestContext->Irp->MdlAddress);
       else
-        buffer = Irp->AssociatedIrp.SystemBuffer;
+        buffer = RequestContext->Irp->AssociatedIrp.SystemBuffer;
 
       ASSERT(buffer != NULL);
+      // The large event context that was not added to the list will not have a
+      // serial number specified. It should use the same serial number as the
+      // initial context that was sent to user mode for the IRP.
+      eventContext->SerialNumber = irpEntry->SerialNumber;
       RtlCopyMemory(buffer, eventContext, eventContext->Length);
 
       info = eventContext->Length;
@@ -1082,19 +1240,23 @@ DokanEventWrite(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     DokanFreeEventContext(eventContext);
     writeIrp->Tail.Overlay.DriverContext[DRIVER_CONTEXT_EVENT] = 0;
 
-    KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
+    KeReleaseSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, oldIrql);
 
-    Irp->IoStatus.Status = status;
-    Irp->IoStatus.Information = info;
+    RequestContext->Irp->IoStatus.Status = status;
+    RequestContext->Irp->IoStatus.Information = info;
 
     // this IRP will be completed by caller function
-    return Irp->IoStatus.Status;
+    return RequestContext->Irp->IoStatus.Status;
   }
 
-  KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
+  KeReleaseSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, oldIrql);
 
-  // if the corresponding IRP not found, the user should already canceled the operation and the IRP already destroyed.
-  DDbgPrint("  EventWrite : Cannot found corresponding IRP. User should already canceled the operation. Return STATUS_CANCELLED.");
+  // if the corresponding IRP not found, the user should already
+  // canceled the operation and the IRP already destroyed.
+  DOKAN_LOG_FINE_IRP(
+      RequestContext,
+      "EventWrite : Cannot found corresponding IRP. User should "
+      "already canceled the operation. Return STATUS_CANCELLED.");
 
   return STATUS_CANCELLED;
 }

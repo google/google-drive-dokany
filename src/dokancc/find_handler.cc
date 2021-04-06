@@ -22,6 +22,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <algorithm>
 #include <cassert>
 
+#include "hex_util.h"
+#include "util.h"
+
 namespace dokan {
 
 void FindHandler::FindFiles(
@@ -33,15 +36,13 @@ void FindHandler::FindFiles(
      bool single_entry,
      util::UniqueVarStructPtr<EVENT_INFORMATION> reply,
      const ReplyFn& reply_fn) {
-  // These are the only info classes we support. Returning
-  // STATUS_NOT_IMPLEMENTED for other ones seems questionable, but the old
-  // version does it.
+  // These are the only info classes we support.
   if (info_class != FileDirectoryInformation &&
       info_class != FileFullDirectoryInformation &&
       info_class != FileNamesInformation &&
       info_class != FileIdBothDirectoryInformation &&
       info_class != FileBothDirectoryInformation) {
-    reply_fn(STATUS_NOT_IMPLEMENTED, 0, start_file_index, std::move(reply));
+    reply_fn(STATUS_INVALID_PARAMETER, 0, start_file_index, std::move(reply));
     return;
   }
   if (start_file_index == 0) {
@@ -85,17 +86,16 @@ NTSTATUS FindHandler::HandleFindFilesReply(FileHandle* handle,
     handle->file_list()->clear();
     NTSTATUS final_status = (start_file_index == 0) ? STATUS_NO_SUCH_FILE :
         STATUS_NO_MORE_FILES;
-    DOKAN_LOG_TRACE(
-        logger_, "FindFiles for %S with pattern %S and info class %u"
-        "returned status 0x%x; changing to 0x%x", handle->path().c_str(),
-        pattern.c_str(), info_class, status, final_status);
+    DOKAN_LOG_(TRACE) << "FindFiles for " << handle->path() << " with pattern "
+                      << pattern << " and info class " << info_class
+                      << " returned status " << Hex(status) << "; changing to "
+                      << Hex(final_status);
     return final_status;
   }
   if (!pattern.empty()) {
     util::FileNameMatcher matcher;
     if (!matcher.Init(pattern)) {
-      DOKAN_LOG_ERROR(logger_, "Failed to init matcher for pattern: %S",
-                       pattern.c_str());
+      DOKAN_LOG_(ERROR) << "Failed to init matcher for pattern: " << pattern;
       return STATUS_INVALID_PARAMETER;
     }
     const auto retained_end = std::remove_if(

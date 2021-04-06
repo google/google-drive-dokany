@@ -12,7 +12,7 @@
 namespace dokan {
 
 // Subscribes to Event Log messages from the driver, and logs them in user mode
-// via DOKAN_LOG_INFO/DOKAN_LOG_ERROR. A dokan::FileSystem object uses one of
+// via DOKAN_LOG(INFO)/DOKAN_LOG(ERROR). A dokan::FileSystem object uses one of
 // these internally and has it active for its own whole lifetime (i.e. before
 // mounting and after unmounting). Clients using the C-based dokan DLL can
 // instantiate and use one of these separately.

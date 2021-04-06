@@ -23,10 +23,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #ifndef DOKAN_TEST_FILE_SYSTEM_TEST_HELPER_H_
 #define DOKAN_TEST_FILE_SYSTEM_TEST_HELPER_H_
 
+// clang-format off
 #include <stdio.h>
 #include <Windows.h>
 #include <sddl.h>  // Must be after Windows.h.
 #include <WinUser.h>
+// clang-format on
 
 #include <functional>
 #include <mutex>  // NOLINT
@@ -35,11 +37,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <vector>
 
 #include "file_system.h"
-#include "gtest.h"
+#include "gtest/gtest.h"
 #include "kernel_defs.h"
 #include "logger.h"
 #include "test_file_callbacks.h"
 #include "test_logger.h"
+#include "util.h"
 #include "volume_callbacks.h"
 
 using std::placeholders::_1;
@@ -56,16 +59,22 @@ const uint64_t kCallbackSync = 1;
 const uint64_t kCallbackAsyncEphemeralThread = 2;
 const uint64_t kSuppressFileNameInEventContext = 4;
 const uint64_t kAssumePagingIoIsLocked = 8;
+const uint64_t kAllowRequestBatching = 16;
+const uint64_t kAllowFullBatching = 32;
+const uint64_t kFcbGarbageCollection = 64;
+const uint64_t kDispatchDriverLogs = 128;
+const uint64_t kUseFsctlEvents = 256;
 
 class FileSystemTestHelper : public VolumeCallbacks {
  public:
-  FileSystemTestHelper(const std::wstring& mount_point, uint64_t param)
+  FileSystemTestHelper(const std::wstring& mount_point, uint64_t param, std::unique_ptr<Logger>&& logger)
       : mount_point_(mount_point),
         drive_letter_(mount_point[0]),
-        param_(param) {
+        param_(param),
+        logger_(std::move(logger)) {
     callbacks_.reset(new TestFileCallbacks(
         std::bind(&FileSystemTestHelper::InvokeCallback, this, _1)));
-    fs_.reset(new FileSystem(callbacks_.get(), this, &logger_));
+    fs_.reset(new FileSystem(callbacks_.get(), this, logger_.get()));
     main_loop_reply_waiting_ =
         CreateEvent(nullptr, true, false, L"main loop reply");
     free_space_.total_bytes = 1024 * 1024 * 1024;
@@ -73,12 +82,24 @@ class FileSystemTestHelper : public VolumeCallbacks {
     free_space_.free_bytes_for_process_user = 1024 * 1024 * 256;
   }
 
+  FileSystemTestHelper(const std::wstring& mount_point, uint64_t param)
+      : FileSystemTestHelper(mount_point, param,
+                             std::make_unique<TestLogger>()) {}
+
   virtual ~FileSystemTestHelper() {
     CloseHandle(main_loop_reply_waiting_);
   }
 
   bool unmounted() const {
     return unmounted_;
+  }
+
+  void SetMountedCallback(std::function<void()> callback) {
+    mounted_callback_ = std::move(callback);
+  }
+
+  void DisableExistenceCheckAfterUnmount() {
+    existence_check_after_unmount_ = false;
   }
 
   void set_free_space_result(NTSTATUS status) {
@@ -93,11 +114,24 @@ class FileSystemTestHelper : public VolumeCallbacks {
   }
 
   void Mounted(FileSystem*) override {
-    CheckDriveExistence(drive_letter_, true);
+    mounted_callback_();
+    if (util::IsMountPointDriveLetter(mount_point_)) {
+      CheckDriveExistence(drive_letter_, true);
+    } else {
+      EXPECT_TRUE(MountPointIsAReparsePoint());
+      EXPECT_TRUE(MountPointHasVolumeAttached());
+    }
   }
 
   void Unmounted() override {
-    CheckDriveExistence(drive_letter_, false);
+    if (existence_check_after_unmount_) {
+      if (util::IsMountPointDriveLetter(mount_point_)) {
+        CheckDriveExistence(drive_letter_, false);
+      } else {
+        EXPECT_FALSE(MountPointIsAReparsePoint());
+        EXPECT_FALSE(MountPointHasVolumeAttached());
+      }
+    }
     std::unique_lock<std::mutex> lock(main_loop_reply_mutex_);
     unmounted_ = true;
     SetEvent(main_loop_reply_waiting_);
@@ -110,10 +144,10 @@ class FileSystemTestHelper : public VolumeCallbacks {
     bool result = ConvertStringSecurityDescriptorToSecurityDescriptor(
         sddl.c_str(), 1, descriptor, (ULONG*)descriptor_length);
     if (!result) {
-      DOKAN_LOG_ERROR(
-          &logger_,
-          "SDDL \"%S\" could not be converted to a security descriptor;"
-          " error %u", sddl.c_str(), GetLastError());
+      DOKAN_LOG(ERROR(logger_.get()))
+          << "SDDL \"" << sddl
+          << "\" could not be converted to a security descriptor; error "
+          << GetLastError();
     }
     ASSERT_TRUE(result);
   }
@@ -143,7 +177,7 @@ class FileSystemTestHelper : public VolumeCallbacks {
 
   void CheckDriveExistence(char letter, bool exists) {
     DWORD drives = GetLogicalDrives();
-    EXPECT_EQ(exists, (drives & (1 << (toupper(letter) - 'A'))) != 0);
+    EXPECT_EQ(exists, (drives & (1 << (std::toupper(letter) - 'A'))) != 0);
   }
 
   void RunFS(StartupOptions options,
@@ -153,6 +187,21 @@ class FileSystemTestHelper : public VolumeCallbacks {
     }
     if (param_ & kAssumePagingIoIsLocked) {
       options.flags |= DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED;
+    }
+    if (param_ & kAllowRequestBatching) {
+      options.flags |= DOKAN_OPTION_ALLOW_REQUEST_BATCHING;
+    }
+    if (param_ & kAllowFullBatching) {
+      options.flags |= DOKAN_OPTION_ALLOW_FULL_BATCHING;
+    }
+    if (param_ & kFcbGarbageCollection) {
+      options.fcb_garbage_collection_interval_ms = 2000;
+    }
+    if (param_ & kDispatchDriverLogs) {
+        options.flags |= DOKAN_OPTION_DISPATCH_DRIVER_LOGS;
+    }
+    if (param_ & kUseFsctlEvents) {
+      options.flags |= DOKAN_OPTION_USE_FSCTL_EVENTS;
     }
     MountResult result = fs_->Mount(mount_point_, options);
     ASSERT_EQ(MountResult::SUCCESS, result);
@@ -239,19 +288,57 @@ class FileSystemTestHelper : public VolumeCallbacks {
     return handle;
   }
 
-  HANDLE Open(const std::wstring& path, DWORD desired_access) {
+  HANDLE Open(const std::wstring& path, DWORD desired_access,
+              DWORD share_access = 0) {
     const std::wstring file_name = mount_point_ + path;
-    HANDLE handle = CreateFile(file_name.c_str(), desired_access, 0, nullptr,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    HANDLE handle =
+        CreateFile(file_name.c_str(), desired_access, share_access, nullptr,
+                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
     EXPECT_NE(INVALID_HANDLE_VALUE, handle);
     return handle;
+  }
+
+  std::unique_ptr<Device> OpenDevice(const FileSystem* fs) {
+    auto device = std::make_unique<Device>(logger_.get());
+    if (!device->Open(L"\\\\." + fs->device_name())) {
+      return nullptr;
+    }
+    return device;
+  }
+
+  bool MountPointIsAReparsePoint() {
+    std::wstring mount_point = mount_point_ + L'\\';
+    DWORD attributes =
+        GetFileAttributes(mount_point.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      DOKAN_LOG(ERROR(logger_.get()))
+          << " GetFileAttributes failed : " << GetLastError();
+      return false;
+    }
+    return attributes & FILE_ATTRIBUTE_REPARSE_POINT;
+  }
+
+  bool MountPointHasVolumeAttached() {
+    const DWORD buffer_length = 50;
+    WCHAR volum_name[buffer_length];
+    memset(volum_name, 0, buffer_length);
+    std::wstring mount_point = mount_point_ + L'\\';
+    if (!GetVolumeNameForVolumeMountPoint(mount_point.c_str(), volum_name,
+                                          buffer_length)) {
+      DOKAN_LOG(ERROR(logger_.get()))
+          << "GetVolumeNameForVolumeMountPoint failed: " << GetLastError();
+      return false;
+    }
+    DOKAN_LOG(INFO(logger_.get()))
+        << "GetVolumeNameForVolumeMountPoint: " << volum_name;
+    return true;
   }
 
   const std::wstring mount_point_;
   const char drive_letter_;
   const uint64_t param_;
   std::unique_ptr<TestFileCallbacks> callbacks_;
-  TestLogger logger_;
+  std::unique_ptr<Logger> logger_;
   std::unique_ptr<FileSystem> fs_;
   FreeSpace free_space_;
   bool unmounted_ = false;
@@ -260,6 +347,8 @@ class FileSystemTestHelper : public VolumeCallbacks {
   HANDLE main_loop_reply_waiting_;
   std::vector<std::function<void()>> main_loop_replies_;
   NTSTATUS free_space_result_ = STATUS_SUCCESS;
+  std::function<void()> mounted_callback_ = []{};
+  bool existence_check_after_unmount_ = true;
 };
 
 }  // namespace test

@@ -23,9 +23,11 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define DOKAN_TEST_FILE_SYSTEM_TEST_BASE_H_
 
 #include "file_system_test_helper.h"
-#include "gtest.h"
+#include "gtest/gtest.h"
 #include "test_file_callbacks.h"
 #include "test_logger.h"
+
+#include <regex>
 
 using std::placeholders::_1;
 
@@ -38,7 +40,7 @@ class FileSystemTestBase : public ::testing::TestWithParam<uint64_t> {
  public:
   FileSystemTestBase()
     : helper_(kDefaultMountPoint, GetParam()),
-      logger_(&helper_.logger_), callbacks_(helper_.callbacks_.get()),
+      logger_(helper_.logger_.get()), callbacks_(helper_.callbacks_.get()),
       mount_point_(helper_.mount_point_), fs_(helper_.fs_.get()) {}
 
  protected:
@@ -46,8 +48,9 @@ class FileSystemTestBase : public ::testing::TestWithParam<uint64_t> {
     helper_.RunFS(options_, test_logic);
   }
 
-  HANDLE Open(const std::wstring& path_within_drive, DWORD desired_access) {
-    return helper_.Open(path_within_drive, desired_access);
+  HANDLE Open(const std::wstring& path_within_drive, DWORD desired_access,
+              DWORD share_access = 0) {
+    return helper_.Open(path_within_drive, desired_access, share_access);
   }
 
   void RemoveSidFromThread(const std::wstring& sddl) {
@@ -100,10 +103,34 @@ class FileSystemTestBase : public ::testing::TestWithParam<uint64_t> {
         std::wstring(info->FileName, info->FileNameLength / sizeof(wchar_t)));
   }
 
+  void ExpectValidDeviceName(const std::wstring& name) {
+    const std::regex name_regex(
+        "\\\\Device\\\\Volume"
+        "\\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\}");
+    std::string narrow_name;
+    EXPECT_TRUE(util::Narrow(name, &narrow_name));
+    if (!std::regex_match(narrow_name, name_regex)) {
+      ADD_FAILURE() << "Unexpected device name: " << name;
+    }
+  }
+
+  void CheckInvalidFunction(ULONG code) {
+    RunFS([&] (FileSystem* fs) {
+      std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+      ASSERT_NE(device, nullptr);
+      char input[1024];
+      char output[1024];
+      EXPECT_FALSE(device->Control(code, input, sizeof(input), output,
+                                   sizeof(output)));
+      EXPECT_EQ(GetLastError(), ERROR_INVALID_FUNCTION);
+      fs->Unmount();
+    });
+  }
+
   FileSystemTestHelper helper_;
   StartupOptions options_;
   // Avoid having to refer to these via helper_ for single-helper tests.
-  TestLogger* const logger_;
+  Logger* const logger_;
   TestFileCallbacks* const callbacks_;
   const std::wstring mount_point_;
   FileSystem* const fs_;

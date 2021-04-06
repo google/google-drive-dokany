@@ -1,0 +1,51 @@
+// Microsoft Visual C++ generated resource script.
+// 
+// Copyright (C) 2016 Google, Inc.
+//
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 3,460,2100,0
+ PRODUCTVERSION 3,460,2100,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x4L
+ FILETYPE VFT_DRV
+ FILESUBTYPE VFT2_DRV_SYSTEM
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "000004e3"
+        BEGIN
+            VALUE "CompanyName", "Google, Inc."
+            VALUE "FileDescription", "Google Drive File System Driver"
+            VALUE "FileVersion", "3.460.2100.0"
+            VALUE "InternalName", "googledrivefs3460.sys"
+            VALUE "LegalCopyright", "Copyright (C) 2016 Google, Inc., Copyright (C) 2016 Dokan Project"
+            VALUE "OriginalFilename", "googledrivefs3460.sys"
+            VALUE "ProductName", "Google Drive File Stream"
+            VALUE "ProductVersion", "3.460.2100.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0, 1251
+    END
+END

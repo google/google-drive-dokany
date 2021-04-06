@@ -1,0 +1,810 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Win10 Debug|Win32">
+      <Configuration>Win10 Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win10 Debug|x64">
+      <Configuration>Win10 Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win10 Release|Win32">
+      <Configuration>Win10 Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win10 Release|x64">
+      <Configuration>Win10 Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8.1 Debug|Win32">
+      <Configuration>Win8.1 Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8.1 Release|Win32">
+      <Configuration>Win8.1 Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8 Debug|Win32">
+      <Configuration>Win8 Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8 Release|Win32">
+      <Configuration>Win8 Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win7 Debug|Win32">
+      <Configuration>Win7 Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win7 Release|Win32">
+      <Configuration>Win7 Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8.1 Debug|x64">
+      <Configuration>Win8.1 Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8.1 Release|x64">
+      <Configuration>Win8.1 Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8 Debug|x64">
+      <Configuration>Win8 Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win8 Release|x64">
+      <Configuration>Win8 Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win7 Debug|x64">
+      <Configuration>Win7 Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Win7 Release|x64">
+      <Configuration>Win7 Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C0269F86-24E0-40DD-B5C8-29CDFDFF2AFB}</ProjectGuid>
+    <TemplateGuid>{dd38f7fc-d7bd-488b-9242-7d8754cde80d}</TemplateGuid>
+    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <MinimumVisualStudioVersion>11.0</MinimumVisualStudioVersion>
+    <Configuration>Win8.1 Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">Win32</Platform>
+    <RootNamespace>dokan</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.18362.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'" Label="Configuration">
+    <TargetVersion>WindowsV6.3</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'" Label="Configuration">
+    <TargetVersion>WindowsV6.3</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'" Label="Configuration">
+    <TargetVersion>Windows8</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'" Label="Configuration">
+    <TargetVersion>Windows8</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'" Label="Configuration">
+    <TargetVersion>Windows7</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'" Label="Configuration">
+    <TargetVersion>Windows7</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'" Label="Configuration">
+    <TargetVersion>WindowsV6.3</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'" Label="Configuration">
+    <TargetVersion>WindowsV6.3</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'" Label="Configuration">
+    <TargetVersion>Windows8</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'" Label="Configuration">
+    <TargetVersion>Windows8</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'" Label="Configuration">
+    <TargetVersion>Windows7</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'" Label="Configuration">
+    <TargetVersion>Windows7</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">
+    <Import Project="..\Dokan.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(Platform)\$(ConfigurationName)\</IntDir>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <TargetName>$(DOKAN_DRIVER_NAME)</TargetName>
+    <CodeAnalysisRuleSet>C:\Program Files (x86)\Windows Kits\10\CodeAnalysis\DriverRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <IncludePath>$(ProjectDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">
+    <Link>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);</AdditionalDependencies>
+    </Link>
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+      <EnableVerbose>false</EnableVerbose>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_DEBUG;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <EnablePREfast>false</EnablePREfast>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NON_DOKANCC_FUNCTIONS=0;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);DOKAN_MAJOR_API_VERSION_NUM=$(DOKAN_MAJOR_API_VERSION_NUM);DOKAN_MAJOR_API_VERSION=$(DOKAN_MAJOR_API_VERSION);DOKAN_DRIVER_NAME=$(DOKAN_DRIVER_NAME);DOKAN_DRIVER_NAME_STR=$(DOKAN_DRIVER_NAME_STR);DOKAN_DEVICE_PREFIX_NAME=$(DOKAN_DEVICE_PREFIX_NAME);DOKAN_DRIVER_VERSION=$(DOKAN_DRIVER_VERSION);VOLUME_LABEL=$(VOLUME_LABEL)</PreprocessorDefinitions>
+      <AdditionalOptions>$(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+    </Inf>
+    <Inf>
+      <TimeStamp>$(DOKAN_PACKAGE_VERSION)</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" />
+    <FilesToPackage Include="@(Inf->'%(CopyOutput)')" Condition="'@(Inf)'!=''" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\..\src\sys\access.c" />
+    <ClCompile Include="..\..\..\src\sys\cleanup.c" />
+    <ClCompile Include="..\..\..\src\sys\close.c" />
+    <ClCompile Include="..\..\..\src\sys\create.c" />
+    <ClCompile Include="..\..\..\src\sys\device.c" />
+    <ClCompile Include="..\..\..\src\sys\directory.c" />
+    <ClCompile Include="..\..\..\src\sys\dispatch.c" />
+    <ClCompile Include="..\..\..\src\sys\dokan.c" />
+    <ClCompile Include="..\..\..\src\sys\event.c" />
+    <ClCompile Include="..\..\..\src\sys\except.c" />
+    <ClCompile Include="..\..\..\src\sys\fileinfo.c" />
+    <ClCompile Include="..\..\..\src\sys\flush.c" />
+    <ClCompile Include="..\..\..\src\sys\fscontrol.c" />
+    <ClCompile Include="..\..\..\src\sys\init.c" />
+    <ClCompile Include="..\..\..\src\sys\lock.c" />
+    <ClCompile Include="..\..\..\src\sys\notification.c" />
+    <ClCompile Include="..\..\..\src\sys\read.c" />
+    <ClCompile Include="..\..\..\src\sys\security.c" />
+    <ClCompile Include="..\..\..\src\sys\timeout.c" />
+    <ClCompile Include="..\..\..\src\sys\util\fcb.c" />
+    <ClCompile Include="..\..\..\src\sys\util\irp_buffer_helper.c" />
+    <ClCompile Include="..\..\..\src\sys\util\log.c" />
+    <ClCompile Include="..\..\..\src\sys\util\mountmgr.c" />
+    <ClCompile Include="..\..\..\src\sys\util\str.c" />
+    <ClCompile Include="..\..\..\src\sys\volume.c" />
+    <ClCompile Include="..\..\..\src\sys\write.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\src\sys\dokan.h" />
+    <ClInclude Include="..\..\..\src\sys\public.h" />
+    <ClInclude Include="..\..\..\src\sys\util\fcb.h" />
+    <ClInclude Include="..\..\..\src\sys\util\irp_buffer_helper.h" />
+    <ClInclude Include="..\..\..\src\sys\util\log.h" />
+    <ClInclude Include="..\..\..\src\sys\util\mountmgr.h" />
+    <ClInclude Include="..\..\..\src\sys\util\str.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="googledrivefs.rc" />
+    <ResourceCompile Include="googledrivefs_msg.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="$(DOKAN_DRIVER_NAME).inf" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="googledrivefs_msg.mc">
+      <FileType>Document</FileType>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">false</ExcludedFromBuild>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8 Release|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win7 Release|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|Win32'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win7 Debug|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">mc "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">Compiling Dokan Messages...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">%(Filename).rc;%(Filename).h;MSG00409.bin</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\src\sys\util\ioctl.inc" />
+    <None Include="..\..\..\src\sys\util\ntstatus_log.inc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

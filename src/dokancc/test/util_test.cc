@@ -28,7 +28,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <thread>  // NOLINT
 #include <vector>
 
-#include "gtest.h"
+#include "gtest/gtest.h"
 
 namespace dokan {
 namespace test {
@@ -243,6 +243,25 @@ TEST(UtilTest, Narrow) {
   EXPECT_EQ("Hw\xc3\xa6t!", temp);
   static const wchar_t kBadData[] = {0xd8ff, 0xffff, 0, 0};
   EXPECT_FALSE(util::Narrow(kBadData, &temp));
+}
+
+TEST(UtilTest, IsMountPointDriveLetter) {
+  for (wchar_t c = L'a'; c < L'z'; c++) {
+    const std::wstring base_letter(1, c);
+    const std::wstring base_letter_upper(1, std::toupper(c));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter_upper));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter + L':'));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter_upper + L':'));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter + L":\\"));
+    EXPECT_TRUE(util::IsMountPointDriveLetter(base_letter_upper + L":\\"));
+  }
+
+  EXPECT_FALSE(util::IsMountPointDriveLetter(L"C\\"));
+  EXPECT_FALSE(util::IsMountPointDriveLetter(L"C:\\foo"));
+  EXPECT_FALSE(util::IsMountPointDriveLetter(L"C:\\foo\\"));
+  EXPECT_FALSE(util::IsMountPointDriveLetter(L"C:\\foo\\bar"));
+  EXPECT_FALSE(util::IsMountPointDriveLetter(L"C:\\foo\\bar\\"));
 }
 
 }  // namespace test

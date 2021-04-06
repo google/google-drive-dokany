@@ -23,11 +23,15 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 namespace dokan {
 
-FileHandle::FileHandle(const std::wstring& path,
-                       ULONG process_id,
-                       bool directory)
-    : path_(path), process_id_(process_id), directory_(directory) {
+FileHandle::FileHandle(const std::wstring& path, ULONG process_id,
+                       DWORD desired_access, DWORD share_access, bool directory)
+    : path_(path),
+      process_id_(process_id),
+      desired_access_(desired_access),
+      share_access_(share_access),
+      directory_(directory) {
   assert(!path.empty());
+  ValidateSharingFlags(share_access_);
   util::SplitAlternateStreamName(&path_, &alternate_stream_name_);
 }
 

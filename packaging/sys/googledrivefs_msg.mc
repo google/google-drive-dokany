@@ -48,6 +48,8 @@ FacilityNames=(System=0x0
 ;// having a message ID per log level with no static content allows us to use
 ;// printf-style logging that's portable to other mechanisms.
 
+LanguageNames = (English=0x409:MSG00409)
+
 MessageId=0x0001 Facility=Gdfs Severity=Informational SymbolicName=GDFS_INFO_MSG
 Language=English
 %2

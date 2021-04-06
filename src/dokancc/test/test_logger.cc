@@ -22,36 +22,33 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 
 #include <cassert>
+#include <string_view>
 
 namespace dokan {
 namespace test {
 
-void TestLogger::VLogInfo(const LogSite& site, const char* format,
-                          va_list args) {
-  Write("Info", site, format, args, &info_);
-}
-
-void TestLogger::VLogError(const LogSite& site, const char* format,
-                           va_list args) {
-  Write("Error", site, format, args, &error_);
-}
-
-void TestLogger::VLogTrace(const LogSite& site, const char* format,
-                           va_list args) {
-  Write("Trace", site, format, args, &trace_);
+void TestLogger::Log(LogLevel log_level, const LogSite& site,
+                     std::string_view msg) {
+  switch (log_level) {
+    case LogLevel::kTrace:
+      Write("Trace", site, msg, &trace_);
+      return;
+    case LogLevel::kInfo:
+      Write("Info", site, msg, &info_);
+      return;
+    case LogLevel::kError:
+      Write("Error", site, msg, &error_);
+      return;
+  }
+  assert(false);
 }
 
 void TestLogger::Write(const char* prefix, const LogSite& site,
-                       const char* format, va_list args,
-                       std::vector<std::string>* v) {
+                       std::string_view msg, std::vector<std::string>* v) {
   std::lock_guard<std::mutex> lock(mutex_);
-  char buffer[2048];
-  vsnprintf(buffer, sizeof(buffer) - 1, format, args);
-  // If the buffer comes out to be an empty string, the format probably doesn't
-  // match the arguments.
-  assert(strlen(buffer) != 0);
-  v->push_back(buffer);
-  printf("%s: %s:%d: %s\n", prefix, site.function, site.line, buffer);
+  v->emplace_back(msg);
+  printf("%s: %s:%d: %s\n", prefix, site.function, site.line,
+         v->back().c_str());
 }
 
 }  // namespace test

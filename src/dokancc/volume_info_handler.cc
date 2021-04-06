@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cassert>
 
+#include "hex_util.h"
+
 namespace dokan {
 namespace {
 
@@ -125,10 +127,9 @@ void VolumeInfoHandler::GetVolumeInfo(
       return;
     }
     default:
-      DOKAN_LOG_ERROR(
-          logger_,
-          "Bypassing GetVolumeInfo with unsupported info class: 0x%x",
-          info_class);
+      DOKAN_LOG_(ERROR)
+          << "Bypassing GetVolumeInfo with unsupported info class: "
+          << Hex(info_class);
       assert(false);
       reply_fn(STATUS_INVALID_PARAMETER, 0, std::move(reply));
       return;

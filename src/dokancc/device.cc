@@ -19,6 +19,11 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include "device.h"
 
+#include <sstream>
+
+#include "hex_util.h"
+#include "util.h"
+
 namespace dokan {
 
 Device::~Device() {
@@ -27,14 +32,26 @@ Device::~Device() {
   }
 }
 
+bool Device::OpenGlobalDevice() {
+  std::wostringstream device_name_stream;
+  device_name_stream << L"\\\\.\\" << DOKAN_DEVICE_PREFIX_NAME << L"_"
+                     << DOKAN_BUILD_LABEL;
+  const std::wstring device = device_name_stream.str();
+  bool opened = Open(device);
+  if (opened) {
+    DOKAN_LOG_(INFO) << "Opened global dokan device: " << device;
+  }
+  return opened;
+}
+
 bool Device::Open(const std::wstring& name) {
-  handle_ = CreateFile(name.c_str(), GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                       OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+  handle_ = CreateFile(name.c_str(), desired_access_,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       FILE_FLAG_OVERLAPPED, NULL);
   name_ = name;
   if (handle_ == INVALID_HANDLE_VALUE) {
-    DOKAN_LOG_ERROR(logger_, "Failed to open device %S; error %u", name.c_str(),
-                    GetLastError());
+    DOKAN_LOG_(ERROR) << "Failed to open device " << name << "; error "
+                      << GetLastError();
     return false;
   }
   return true;
@@ -79,15 +96,13 @@ bool Device::GetAsyncResult(OVERLAPPED* overlapped,
   if (!GetOverlappedResult(handle_, overlapped, actual_output_size, FALSE)) {
     *error = GetLastError();
     if (*error == ERROR_OPERATION_ABORTED) {
-      DOKAN_LOG_INFO(logger_,
-                     "Async IOCTL aborted. This is normal during unmount.");
+      DOKAN_LOG_(INFO) << "Async IOCTL aborted. This is normal during unmount.";
     } else if (*error == ERROR_OPERATION_IN_PROGRESS) {
-      DOKAN_LOG_ERROR(
-          logger_,
-          "GetAsyncResult was called without waiting for completion.");
+      DOKAN_LOG_(ERROR)
+          << "GetAsyncResult was called without waiting for completion.";
     } else {
-      DOKAN_LOG_ERROR(logger_, "Async IOCTL failed to produce result,"
-                      " error = %u", *error);
+      DOKAN_LOG_(ERROR) << "Async IOCTL failed to produce result, error = "
+                        << *error;
     }
     *actual_output_size = 0;
     return false;
@@ -98,12 +113,17 @@ bool Device::GetAsyncResult(OVERLAPPED* overlapped,
 void Device::LogGenericResult(ULONG ioctl) {
   DWORD error = GetLastError();
   if (error == ERROR_FILE_NOT_FOUND) {
-    DOKAN_LOG_INFO(logger_, "The device %S has been unmounted and did not"
-                   " respond to IOCTL %x", name_.c_str(), ioctl);
+    DOKAN_LOG_(INFO) << "The device " << name_
+                     << " has been unmounted and did not respond to IOCTL "
+                     << Hex(ioctl);
   } else {
-    DOKAN_LOG_ERROR(logger_, "IOCTL 0x%x failed on device %S; error: %u", ioctl,
-                    name_.c_str(), GetLastError());
+    DOKAN_LOG_(ERROR) << "IOCTL " << Hex(ioctl) << " failed on device " << name_
+                      << "; error: " << GetLastError();
   }
+}
+
+void Device::SetDesiredAccess(DWORD desired_access) {
+  desired_access_ = desired_access;
 }
 
 }  // namespace dokan

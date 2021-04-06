@@ -21,6 +21,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <cassert>
 
+#include "hex_util.h"
+
 using std::placeholders::_1;
 using std::placeholders::_2;
 
@@ -142,10 +144,8 @@ NTSTATUS FileInfoHandler::HandleGetInfoReply(
     // The original code turns any unsuccessful status into
     // STATUS_INVALID_PARAMETER, which may be wise, given that it's widely
     // checked for.
-    DOKAN_LOG_TRACE(
-        logger_,
-        "Turning GetInfo failure status 0x%x into STATUS_INVALID_PARAMETER.",
-        status);
+    DOKAN_LOG_(TRACE) << "Turning GetInfo failure status " << Hex(status)
+                      << " into STATUS_INVALID_PARAMETER.";
     return STATUS_INVALID_PARAMETER;
   }
 
@@ -204,16 +204,6 @@ void FileInfoHandler::GetInfo(
     return;
   }
 
-  // These are not implemented here or in the C library. We should arguably just
-  // fall to the bottom case for these. STATUS_NOT_IMPLEMENTED tends to be a bad
-  // status for production code because it's checked for in virtually no calling
-  // code, but for now we're keeping it like the C library.
-  if (info_class == FileAlternateNameInformation ||
-      info_class == FileCompressionInformation) {
-    reply_fn(STATUS_NOT_IMPLEMENTED, 0, std::move(reply));
-    return;
-  }
-
   // Surprisingly, this does get used for non-network file systems. It may only
   // be filter drivers that do it in practice.
   // TODO(drivefs-team): Make the driver handle this one.
@@ -245,15 +235,13 @@ void FileInfoHandler::GetInfo(
     return;
   }
   if (info_class < FileMaximumInformation) {
-    DOKAN_LOG_TRACE(logger_,
-                    "GetInfo request with known, unhandled info class: %u",
-                    info_class);
+    DOKAN_LOG_(TRACE) << "GetInfo request with known, unhandled info class: "
+                      << info_class;
   } else {
     // An info class that gets us here would be one Microsoft added after this
     // code was written.
-    DOKAN_LOG_INFO(logger_,
-                   "GetInfo request with new, unhandled info class: %u",
-                   info_class);
+    DOKAN_LOG_(INFO) << "GetInfo request with new, unhandled info class: "
+                     << info_class;
   }
   reply_fn(STATUS_INVALID_PARAMETER, 0, std::move(reply));
 }

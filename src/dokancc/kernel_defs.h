@@ -68,6 +68,12 @@ typedef LONG NTSTATUS;
 #define IRP_MN_UNLOCK_ALL 0x03
 #define IRP_MN_UNLOCK_ALL_BY_KEY 0x04
 
+#define IOCTL_MOUNTDEV_LINK_CREATED 0x4dc010
+#define IOCTL_MOUNTDEV_QUERY_DEVICE_NAME 0x4d0008
+#define IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME 0x4d000c
+#define IOCTL_REDIR_QUERY_PATH 0x14018f
+#define IOCTL_REDIR_QUERY_PATH_EX 0x140193
+
 typedef enum _FILE_INFORMATION_CLASS {
   FileDirectoryInformation = 1,
   FileFullDirectoryInformation,            // 2
@@ -1260,6 +1266,17 @@ typedef struct _IO_STATUS_BLOCK {
   ULONG_PTR Information;
 } IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
 
+typedef struct _MOUNTDEV_NAME {
+  USHORT NameLength;
+  WCHAR  Name[1];
+} MOUNTDEV_NAME, *PMOUNTDEV_NAME;
+
+typedef struct _MOUNTDEV_SUGGESTED_LINK_NAME {
+  BOOLEAN UseOnlyIfThereAreNoOtherLinks;
+  USHORT  NameLength;
+  WCHAR   Name[1];
+} MOUNTDEV_SUGGESTED_LINK_NAME, *PMOUNTDEV_SUGGESTED_LINK_NAME;
+
 extern "C" {
 
 void WINAPI RtlInitUnicodeString(UNICODE_STRING* String,
@@ -1288,11 +1305,30 @@ NTSTATUS NTAPI NtCreateFile(PHANDLE FileHandle,
                             PVOID EaBuffer,
                             ULONG EaLength);
 
+NTSTATUS NTAPI NtClose(IN HANDLE Handle);
+
+NTSTATUS NTAPI NtQueryInformationFile(
+    HANDLE FileHandle,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID FileInformation,
+    ULONG Length,
+    FILE_INFORMATION_CLASS FileInformationClass);
+
+NTSTATUS NTAPI NtQueryVolumeInformationFile(
+    HANDLE FileHandle,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID FsInformation,
+    ULONG Length,
+    FS_INFORMATION_CLASS FsInformationClass);
+
 NTSTATUS NTAPI NtFlushVirtualMemory(HANDLE ProcessHandle,
                                     PVOID *BaseAddress,
                                     PSIZE_T RegionSize,
                                     PIO_STATUS_BLOCK IoStatus);
 
+NTSTATUS NTAPI NtSetInformationFile(
+    HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation,
+    ULONG Length, FILE_INFORMATION_CLASS FileInformationClass);
 }
 
 #endif // FILEINFO_H_

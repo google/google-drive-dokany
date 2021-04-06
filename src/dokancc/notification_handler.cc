@@ -1,8 +1,14 @@
+// clang-format off
 #include "file_system.h"
+// clang-format on
+
 #include "notification_handler.h"
-#include "public.h"
 
 #include <cassert>
+
+#include "public.h"
+#include "util.h"
+#include "hex_util.h"
 
 namespace dokan {
 namespace {
@@ -12,7 +18,9 @@ class NotificationHandlerImpl : public NotificationHandler {
   NotificationHandlerImpl(const FileSystem* fs, Logger* logger)
       : fs_(fs),
         logger_(logger),
-        notification_handle_(logger) {}
+        notification_handle_(logger) {
+    notification_handle_.SetDesiredAccess(0);
+  }
 
   bool NotifyCreate(const std::wstring& path, bool directory) override {
     return SendNotification(path, directory ? FILE_NOTIFY_CHANGE_DIR_NAME :
@@ -60,13 +68,13 @@ class NotificationHandlerImpl : public NotificationHandler {
         fs_->mount_point() + DOKAN_NOTIFICATION_FILE_NAME;
     if (!notification_handle_.is_open() &&
         !notification_handle_.Open(notification_handle_path)) {
-      DOKAN_LOG_ERROR(logger_, "Failed to open notification handle path: %S",
-                      notification_handle_path.c_str());
+      DOKAN_LOG_(ERROR) << "Failed to open notification handle path: "
+                        << notification_handle_path;
       return false;
     }
     if (path.empty() || path[0] != L'\\') {
-      DOKAN_LOG_ERROR(logger_, "Notification sent for invalid path: '%S'",
-                      path.c_str());
+      DOKAN_LOG_(ERROR) << "Notification sent for invalid path: '" << path
+                        << "'";
       return false;
     }
     SHORT string_size = (USHORT)(path.size() * sizeof(WCHAR));
@@ -78,10 +86,9 @@ class NotificationHandlerImpl : public NotificationHandler {
     input->Length = string_size;
     memcpy(input->Buffer, path.c_str(), string_size);
     if (!notification_handle_.Control(FSCTL_NOTIFY_PATH, input.get(), size)) {
-      DOKAN_LOG_ERROR(
-          logger_,
-          "Failed to send notification for path %S, filter 0x%x, action 0x%x",
-          path.c_str(), filter, action);
+      DOKAN_LOG_(ERROR) << "Failed to send notification for path " << path
+                        << ", filter " << Hex(filter) << ", action "
+                        << Hex(action);
       return false;
     }
     return true;

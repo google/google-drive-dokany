@@ -34,15 +34,20 @@ const wchar_t kGroupAdminsSddl[] = L"G:BA";
 const auto kParams = testing::Values(
     kCallbackSync,
     kCallbackAsyncEphemeralThread,
-    kCallbackSync | kSuppressFileNameInEventContext,
-    kCallbackSync | kSuppressFileNameInEventContext | kAssumePagingIoIsLocked);
+    // Current DriveFS prod config.
+    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
+        kAllowRequestBatching | kFcbGarbageCollection,
+    // Likely next DriveFS prod config.
+    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
+        kAssumePagingIoIsLocked | kAllowRequestBatching | kAllowFullBatching |
+        kFcbGarbageCollection | kDispatchDriverLogs | kUseFsctlEvents);
 
 class MountTest : public FileSystemTestBase {};
 
 TEST_P(MountTest, NeverMounted) {
   // This test is basically just proving that the destructor doesn't assert if
   // we never mount.
-  EXPECT_FALSE(logger_->HasErrors());
+  EXPECT_FALSE(dynamic_cast<TestLogger*>(logger_)->HasErrors());
 }
 
 TEST_P(MountTest, MountAndUnmountAfterPostStart) {
@@ -52,7 +57,7 @@ TEST_P(MountTest, MountAndUnmountAfterPostStart) {
   });
 
   EXPECT_TRUE(helper_.unmounted());
-  EXPECT_FALSE(logger_->HasErrors());
+  // Note that errors from PostStart may be logged during this test.
 }
 
 TEST_P(MountTest, MountAndUnmountImmediately) {
@@ -83,19 +88,7 @@ TEST_P(MountTest, MountAndUnmountBeforeLoop) {
   // Note that errors from PostStart may be logged during this test.
 }
 
-TEST_P(MountTest, GlobalReleaseBufferOverflow) {
-  Device device(logger_);
-  ASSERT_TRUE(device.Open(DOKAN_GLOBAL_DEVICE_NAME));
-  char buffer[800];
-  memset(buffer, 0x41, sizeof(buffer));
-  *(WORD*)buffer = 0x320;
-  *(WORD*)(buffer + 2) = 0x31a;
-  *(uint64_t*)(buffer + 776) = 0x4242424242424242;
-  ASSERT_FALSE(device.Control(0x222010, buffer, sizeof(buffer)));
-  ASSERT_EQ(ERROR_MORE_DATA, GetLastError());
-}
-
-TEST_P(MountTest, MountTwoDrivesAtOnce) {
+TEST_P(MountTest, MountTwoDifferentDriveLettersAtOnce) {
   // This used to fail because we would use an overlapped event with the same
   // name both times.
   std::thread t1([&] {
@@ -128,6 +121,121 @@ TEST_P(MountTest, MountTwoDrivesAtOnce) {
   });
   t1.join();
   t2.join();
+}
+
+TEST_P(MountTest, MountSameDriveTwiceAtOnce) {
+  std::mutex mutex;
+  std::condition_variable cv;
+  const std::wstring file_on_first_drive = mount_point_ + L"\\foo.txt";
+  const std::wstring file_on_second_drive = mount_point_ + L"\\bar.txt";
+  std::thread t1([&] {
+    FileSystemTestHelper helper1(mount_point_, GetParam());
+    helper1.callbacks_->SetUpFile(L"\\foo.txt", "foo");
+    helper1.DisableExistenceCheckAfterUnmount();
+    helper1.RunFS(options_, [&](FileSystem* fs) {
+      // Prove the drive is bound to this helper's callbacks.
+      EXPECT_NE(GetFileAttributes(file_on_first_drive.c_str()), -1);
+      // Allow the 2nd thread to proceed.
+      cv.notify_one();
+    });
+    EXPECT_TRUE(helper1.unmounted());
+  });
+  std::thread t2([&] {
+    FileSystemTestHelper helper2(mount_point_, GetParam());
+    helper2.callbacks_->SetUpFile(L"\\bar.txt", "bar");
+    // Wait until the 1st thread has mounted and checked its drive before we
+    // supersede it with a new drive.
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      cv.wait(lock);
+    }
+    // This RunFS call should unmount the first drive and replace it with a new
+    // one.
+    helper2.RunFS(options_, [&](FileSystem* fs) {
+      // Prove we are not talking to the callbacks from helper1.
+      EXPECT_EQ(GetFileAttributes(file_on_first_drive.c_str()), -1);
+      EXPECT_NE(GetFileAttributes(file_on_second_drive.c_str()), -1);
+      fs->Unmount();
+    });
+    EXPECT_TRUE(helper2.unmounted());
+  });
+  t1.join();
+  t2.join();
+}
+
+TEST_P(MountTest, MountAndFakeDriveReassignment) {
+  // This is a test to hit the code path where the mount manager assigns a
+  // different-than-requested drive letter. Since we are faking an invocation to
+  // the driver from the mount manager, this gets the dokan driver's internal
+  // structs to update, but not the actual usable mount point.
+  RunFS([this](FileSystem* fs) {
+    std::wstring name = L"\\DosDevices\\Q:";
+    USHORT name_length = + name.size() * sizeof(wchar_t);
+    std::vector<char> mountdev_name_buffer(sizeof(MOUNTDEV_NAME) + name_length);
+    MOUNTDEV_NAME* mountdev_name = reinterpret_cast<MOUNTDEV_NAME*>(
+        mountdev_name_buffer.data());
+    mountdev_name->NameLength = name_length;
+    wcscpy(mountdev_name->Name, name.c_str());
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    EXPECT_TRUE(device->Control(IOCTL_MOUNTDEV_LINK_CREATED, mountdev_name,
+                                mountdev_name_buffer.size()));
+
+    // To prove it worked, unmount by the new mount point.
+    Device global_device(logger_);
+    ASSERT_TRUE(global_device.OpenGlobalDevice());
+    DOKAN_UNICODE_STRING_INTERMEDIATE drive_to_delete;
+    drive_to_delete.Length = sizeof(wchar_t);
+    drive_to_delete.MaximumLength = drive_to_delete.Length;
+    drive_to_delete.Buffer[0] = 'Q';
+    ULONG ioctl = IOCTL_EVENT_RELEASE;
+    ioctl = (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_RELEASE
+                                           : IOCTL_EVENT_RELEASE;
+    EXPECT_TRUE(global_device.Control(ioctl, drive_to_delete));
+  });
+
+  EXPECT_TRUE(helper_.unmounted());
+}
+
+TEST_P(MountTest, MountDirectory) {
+  const std::wstring path = L"\\test_CreateAndClose.txt";
+  const std::wstring mount_point = L"C:\\MountDirectory";
+  EXPECT_TRUE(CreateDirectory(mount_point.c_str(), NULL));
+  FileSystemTestHelper helper(mount_point, GetParam());
+  helper.callbacks_->SetUpFile(path);
+  helper.RunFS(options_, [&](FileSystem* fs) {
+    HANDLE handle = CreateFile((mount_point + path).c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle);
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+  EXPECT_TRUE(helper.unmounted());
+  EXPECT_TRUE(RemoveDirectory(mount_point.c_str()));
+  // Note that errors from PostStart may be logged during this test.
+}
+
+TEST_P(MountTest, MountAndGetVolumeSizeBeforeEventWait) {
+  // This used to trigger a deadlock due to the volume info call dispatching to
+  // user mode while the I/O loop is not running.
+  helper_.SetMountedCallback([&] {
+    HANDLE handle = helper_.OpenFSRootDirectory();
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(IO_STATUS_BLOCK));
+    // Note: we don't care about this data until we change it to be accurate.
+    char data[4096];
+    NTSTATUS status = NtQueryVolumeInformationFile(
+        handle, &iosb, data, sizeof(data), FileFsFullSizeInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    CloseHandle(handle);
+  });
+  helper_.RunFS(options_, [&](FileSystem* fs) {
+    fs->WaitUntilPostStartDone();
+    fs->Unmount();
+  });
+  EXPECT_TRUE(helper_.unmounted());
+  // Note that errors from PostStart may be logged during this test.
 }
 
 INSTANTIATE_TEST_CASE_P(MountTests, MountTest, kParams);
@@ -242,6 +350,124 @@ TEST_P(OpenCloseTest, SupersedeRoot) {
   });
 }
 
+TEST_P(OpenCloseTest, GoodFileNameCaseAfterBadCase) {
+  const wchar_t path[] = L"\\test_CaseSwitch.txt";
+  const wchar_t lower_path[] = L"\\test_caseswitch.txt";
+  callbacks_->SetUpFile(path);
+  const Observer* lower_observer = callbacks_->AddObserver(
+      lower_path,
+      FILE_GENERIC_READ,
+      FILE_ATTRIBUTE_NORMAL,
+      FILE_SHARE_READ | FILE_SHARE_WRITE,
+      FILE_OPEN,
+      FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+  const Observer* observer = callbacks_->AddObserver(
+      path,
+      FILE_GENERIC_READ,
+      FILE_ATTRIBUTE_NORMAL,
+      FILE_SHARE_READ | FILE_SHARE_WRITE,
+      FILE_OPEN,
+      FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+  RunFS([&](FileSystem* fs) {
+    const std::wstring file_name = mount_point_ + path;
+    const std::wstring lower_file_name = mount_point_ + lower_path;
+    HANDLE lower_handle = CreateFile(
+        lower_file_name.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_EQ(lower_observer->create_result, STATUS_OBJECT_NAME_NOT_FOUND);
+    EXPECT_EQ(lower_handle, INVALID_HANDLE_VALUE);
+
+    // The point is to make sure lower_file_name doesn't somehow get passed to
+    // the Create callback below as a consequence of the above usage with that
+    // case. FCB garbage collection, for example, specifically avoids this.
+    // Note however that with concurrent or overlapping-scoped successful opens,
+    // the case you get has always been unspecified behavior.
+    HANDLE handle = CreateFile(
+        file_name.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_EQ(observer->create_result, STATUS_SUCCESS);
+    EXPECT_NE(handle, INVALID_HANDLE_VALUE);
+    EXPECT_TRUE(CloseHandle(handle));
+    EXPECT_TRUE(observer->cleanup_invoked);
+    fs->Unmount();
+  });
+}
+
+TEST_P(OpenCloseTest, RelativeFile) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpFile(dir_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    NTSTATUS status;
+
+    // Open parent directory
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES attributes_dir;
+    IO_STATUS_BLOCK iosb_dir;
+    memset(&attributes_dir, 0, sizeof(OBJECT_ATTRIBUTES));
+    memset(&iosb_dir, 0, sizeof(IO_STATUS_BLOCK));
+    UNICODE_STRING name_dir;
+    const std::wstring full_dir_name = L"\\??\\" + mount_point_ + dir_path;
+    RtlInitUnicodeString(&name_dir, full_dir_name.c_str());
+    attributes_dir.Length = sizeof(OBJECT_ATTRIBUTES);
+    attributes_dir.ObjectName = &name_dir;
+    status = NtCreateFile(
+        &handle_dir, FILE_ALL_ACCESS, &attributes_dir, &iosb_dir,
+        /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+        /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+        /*EaBuffer=*/nullptr, /*EaLength=*/0);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES attributes_file;
+    IO_STATUS_BLOCK iosb_file;
+    memset(&attributes_file, 0, sizeof(OBJECT_ATTRIBUTES));
+    memset(&iosb_file, 0, sizeof(IO_STATUS_BLOCK));
+    UNICODE_STRING name_file;
+    const std::wstring relative_file_name = L"file.txt";
+    RtlInitUnicodeString(&name_file, relative_file_name.c_str());
+    attributes_file.Length = sizeof(OBJECT_ATTRIBUTES);
+    attributes_file.ObjectName = &name_file;
+    attributes_file.RootDirectory = handle_dir;
+    status = NtCreateFile(&handle_file, FILE_ALL_ACCESS, &attributes_file,
+                          &iosb_file,
+                          /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+                          /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+                          /*EaBuffer=*/nullptr, /*EaLength=*/0);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    NtClose(handle_file);
+
+    // Open child file with leading backslash (not relative path)
+    HANDLE handle_incorrect_file = INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES attributes_incorrect_file;
+    IO_STATUS_BLOCK iosb_incorrect_file;
+    memset(&attributes_incorrect_file, 0, sizeof(OBJECT_ATTRIBUTES));
+    memset(&iosb_incorrect_file, 0, sizeof(IO_STATUS_BLOCK));
+    UNICODE_STRING name_incorrect_file;
+    const std::wstring non_relative_file_name = L"\\file.txt";
+    RtlInitUnicodeString(&name_incorrect_file, non_relative_file_name.c_str());
+    attributes_incorrect_file.Length = sizeof(OBJECT_ATTRIBUTES);
+    attributes_incorrect_file.ObjectName = &name_incorrect_file;
+    attributes_incorrect_file.RootDirectory = handle_dir;
+    status = NtCreateFile(&handle_incorrect_file, FILE_ALL_ACCESS,
+                          &attributes_incorrect_file, &iosb_incorrect_file,
+                          /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+                          /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+                          /*EaBuffer=*/nullptr, /*EaLength=*/0);
+    EXPECT_EQ(STATUS_INVALID_PARAMETER, status);
+
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
 INSTANTIATE_TEST_CASE_P(OpenCloseTests, OpenCloseTest, kParams);
 
 class VolumeInfoTest : public FileSystemTestBase {};
@@ -314,6 +540,42 @@ TEST_P(VolumeInfoTest, GetFreeSpace_Error) {
   });
 }
 
+TEST_P(VolumeInfoTest, GetVolumeMetrics) {
+  // Note: this is not a deep check of the metric values, just proof that we
+  // can get them.
+  const wchar_t path[] = L"\\test_GetVolumeMetrics.txt";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    // First guarantee that there is at least 1 FCB allocation.
+    HANDLE handle = Open(path, GENERIC_READ);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle);
+    EXPECT_TRUE(CloseHandle(handle));
+
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    VOLUME_METRICS metrics;
+    EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
+    EXPECT_GT(metrics.FcbAllocations, 0);
+    EXPECT_LT(metrics.FcbDeletions, metrics.FcbAllocations);
+    fs->Unmount();
+  });
+}
+
+TEST_P(VolumeInfoTest, GetVolumeLabelCount) {
+  RunFS([&](FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    VOLUME_METRICS metrics;
+    EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
+    EXPECT_EQ(metrics.FsctlVolumeLabelCount, 0);
+
+    std::vector<char> buffer(256);
+    EXPECT_TRUE(device->ControlWithOutputOnly(FSCTL_VOLUME_LABEL, buffer.data(),
+                                              buffer.size()));
+    EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
+    EXPECT_EQ(metrics.FsctlVolumeLabelCount, 1);
+    fs->Unmount();
+  });
+}
+
 INSTANTIATE_TEST_CASE_P(VolumeInfoTests, VolumeInfoTest, kParams);
 
 class MetadataTest : public FileSystemTestBase {};
@@ -339,9 +601,8 @@ TEST_P(MetadataTest, GetInfo_IdInfo) {
     // ID info is unsupported below Windows 8 according to this page. If we try
     // it, it "succeeds" but the data gets zeroed out.
     //https://msdn.microsoft.com/en-us/library/windows/desktop/aa364228(v=vs.85).aspx
-    DOKAN_LOG_INFO(
-        logger_,
-        "Skipping ID info test because it is unsupported on this OS version.");
+    DOKAN_LOG_(INFO) << "Skipping ID info test because it is "
+                        "unsupported on this OS version.";
     return;
   }
   const wchar_t path[] = L"\\test_GetInfo_IdInfo";
@@ -379,13 +640,99 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
   callbacks_->SetUpFile(path);
   RunFS([&](FileSystem* fs) {
     HANDLE handle = Open(path, GENERIC_READ);
-    size_t size = sizeof(FILE_NAME_INFO) + 5;
-    auto info = util::MakeUniqueVarStruct<FILE_NAME_INFO>(size);
-    bool result = GetFileInformationByHandleEx(handle, FileNameInfo, info.get(),
-                                               size);
-    EXPECT_FALSE(result);
-    EXPECT_EQ(ERROR_MORE_DATA, GetLastError());
-    EXPECT_EQ(wcslen(path) * sizeof(path[0]), info->FileNameLength);
+    auto info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(
+        handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION),
+        FileNameInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(L"\\t", std::wstring(info->FileName, 2));
+    EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
+
+    // You can't get half a character back.
+    info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(
+        handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 1,
+        FileNameInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(L"\\t", std::wstring(info->FileName, 2));
+    EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
+
+    // Get back 1 character more than the fixed size of the struct.
+    info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(
+        handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 2,
+        FileNameInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 2);
+    EXPECT_EQ(L"\\te", std::wstring(info->FileName, 3));
+    EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
+
+    // You can't get back 1.5 characters.
+    info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(
+        handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 3,
+        FileNameInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 2);
+    EXPECT_EQ(L"\\te", std::wstring(info->FileName, 3));
+    EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
+
+    // Get back 2 more than the fixed size of the struct.
+    info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(
+        handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 4,
+        FileNameInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 4);
+    EXPECT_EQ(L"\\tes", std::wstring(info->FileName, 4));
+    EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_NameInfo_Root) {
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = helper_.OpenFSRootDirectory();
+    FILE_NAME_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(
+        handle, &iosb, &info, sizeof(info), FileNameInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(std::wstring(info.FileName, 1), L"\\");
+    EXPECT_EQ(info.FileNameLength, 2);
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_NameInfo_SingleCharName) {
+  const wchar_t path[] = L"\\x";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    FILE_NAME_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(
+        handle, &iosb, &info, sizeof(info), FileNameInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(std::wstring(info.FileName, 2), L"\\x");
+    EXPECT_EQ(info.FileNameLength, 4);
+    CloseHandle(handle);
     fs->Unmount();
   });
 }
@@ -411,7 +758,7 @@ TEST_P(MetadataTest, GetInfo_BasicInfo) {
   const wchar_t path[] = L"\\test_GetInfo_BasicInfo";
   FileInfo data_to_return = {0};
   data_to_return.creation_time.dwHighDateTime = 0x11111111;
-  data_to_return.creation_time.dwLowDateTime= 0x22222222;
+  data_to_return.creation_time.dwLowDateTime = 0x22222222;
   data_to_return.last_write_time.dwHighDateTime = 0x33333333;
   data_to_return.last_write_time.dwLowDateTime = 0x44444444;
   data_to_return.last_access_time.dwHighDateTime = 0x55555555;
@@ -465,7 +812,7 @@ TEST_P(MetadataTest, GetInfo_CompressionInfo) {
     bool result = GetFileInformationByHandleEx(handle, FileCompressionInfo,
                                                &info, sizeof(info));
     EXPECT_FALSE(result);
-    EXPECT_EQ(ERROR_INVALID_FUNCTION, GetLastError());
+    EXPECT_EQ(ERROR_INVALID_PARAMETER, GetLastError());
     fs->Unmount();
   });
 }
@@ -910,6 +1257,61 @@ INSTANTIATE_TEST_CASE_P(MoveDeleteTests, MoveDeleteTest, kParams);
 
 class ReadWriteTest : public FileSystemTestBase {};
 
+TEST_P(ReadWriteTest, HandleFlags) {
+  const wchar_t path[] = L"\\test_HandleFlags";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    callbacks_->SetHandleMatcher([=](const dokan::FileHandle* handle) {
+      return handle->path() == path && handle->has_readonly_desired_access() &&
+             !handle->allows_sharing(FILE_SHARE_READ) &&
+             !handle->allows_sharing(FILE_SHARE_WRITE) &&
+             !handle->allows_sharing(FILE_SHARE_DELETE);
+    });
+    CloseHandle(Open(path, GENERIC_READ));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+
+    callbacks_->SetHandleMatcher([=](const dokan::FileHandle* handle) {
+      return handle->path() == path && !handle->has_readonly_desired_access() &&
+             !handle->allows_sharing(FILE_SHARE_READ) &&
+             !handle->allows_sharing(FILE_SHARE_WRITE) &&
+             !handle->allows_sharing(FILE_SHARE_DELETE);
+    });
+    CloseHandle(Open(path, GENERIC_WRITE));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+    CloseHandle(Open(path, GENERIC_READ | GENERIC_WRITE));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+    CloseHandle(Open(path, GENERIC_ALL));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+
+    callbacks_->SetHandleMatcher([=](const dokan::FileHandle* handle) {
+      return handle->path() == path && handle->has_readonly_desired_access() &&
+             handle->allows_sharing(FILE_SHARE_READ) &&
+             !handle->allows_sharing(FILE_SHARE_WRITE) &&
+             !handle->allows_sharing(FILE_SHARE_DELETE);
+    });
+    CloseHandle(Open(path, GENERIC_READ, FILE_SHARE_READ));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+    callbacks_->SetHandleMatcher([=](const dokan::FileHandle* handle) {
+      return handle->path() == path && handle->has_readonly_desired_access() &&
+             handle->allows_sharing(FILE_SHARE_READ) &&
+             handle->allows_sharing(FILE_SHARE_WRITE) &&
+             !handle->allows_sharing(FILE_SHARE_DELETE);
+    });
+    CloseHandle(Open(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+    callbacks_->SetHandleMatcher([=](const dokan::FileHandle* handle) {
+      return handle->path() == path && handle->has_readonly_desired_access() &&
+             handle->allows_sharing(FILE_SHARE_READ) &&
+             handle->allows_sharing(FILE_SHARE_WRITE) &&
+             handle->allows_sharing(FILE_SHARE_DELETE);
+    });
+    CloseHandle(Open(path, GENERIC_READ,
+                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE));
+    EXPECT_TRUE(callbacks_->CheckHandleMatcher());
+    fs->Unmount();
+  });
+}
+
 TEST_P(ReadWriteTest, Read_Success) {
   const wchar_t path[] = L"\\test_Read_Success";
   const char content[] = "It was a dark and stormy night.";
@@ -1047,9 +1449,7 @@ TEST_P(ReadWriteTest, Read_4GB_Boundary_Success) {
     // The read tends to fail in Windows 7 test VMs, which is not reproducible
     // using a comparable VM image directly. We think this may be due to the
     // build ramdisk using too much of the available RAM.
-    DOKAN_LOG_INFO(
-        logger_,
-        "Skipping 4 GB boundary successful read test.");
+    DOKAN_LOG_(INFO) << "Skipping 4 GB boundary successful read test.";
     return;
   }
   const wchar_t path[] = L"\\test_Read_4GB_Boundary_Success";
@@ -1176,9 +1576,7 @@ TEST_P(ReadWriteTest, Write_4GB_Boundary_Success) {
     // The write tends to fail in Windows 7 test VMs, which is not reproducible
     // using a comparable VM image directly. We think this may be due to the
     // build ramdisk using too much of the available RAM.
-    DOKAN_LOG_INFO(
-        logger_,
-        "Skipping 4 GB boundary successful write test.");
+    DOKAN_LOG_(INFO) << "Skipping 4 GB boundary successful write test.";
     return;
   }
   const wchar_t path[] = L"\\test_Write_4GB_Boundary_Success";
@@ -1235,7 +1633,7 @@ TEST_P(ReadWriteTest, MemoryMappedWriteAndFlush) {
     }
     IO_STATUS_BLOCK status_block{0};
     HANDLE process = GetCurrentProcess();
-    size_t flush_size = 131072;
+    SIZE_T flush_size = 131072;
     NTSTATUS status = NtFlushVirtualMemory(process,
                                            reinterpret_cast<void**>(&data),
                                            &flush_size, &status_block);
@@ -1327,6 +1725,33 @@ TEST_P(SecurityTest, GetSecurity_InsufficientBuffer) {
   });
 }
 
+TEST_P(SecurityTest, GetSecurity_NoBuffer) {
+  // The reason this test is worth having in addition to InsufficientBuffer is
+  // that this one is more likely to hit an access violation due to something
+  // erroneously taking the required size to be the reply payload size. The
+  // other test is more of an off-by-one test.
+  std::wstring sddl;
+  sddl += kOwnerAccountOperatorsSddl;
+  sddl += kGroupAdminsSddl;
+  sddl += kAllowEveryoneSddl;
+  helper_.SetSecurityDescriptor(sddl, &options_.volume_security_descriptor,
+                                &options_.volume_security_descriptor_length);
+  RunFS([&] (FileSystem* fs) {
+    HANDLE handle = helper_.OpenFSRootDirectory();
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle);
+    SECURITY_INFORMATION info = DACL_SECURITY_INFORMATION |
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
+    auto sd = util::MakeUniqueVarStruct<SECURITY_DESCRIPTOR>(79);
+    DWORD length_needed = 0;
+    bool result = GetUserObjectSecurity(handle, &info, sd.get(), 0,
+                                        &length_needed);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(80, length_needed);
+    EXPECT_EQ(ERROR_INSUFFICIENT_BUFFER, GetLastError());
+    fs->Unmount();
+  });
+}
+
 TEST_P(SecurityTest, GetSecurity_ReadonlyDescriptor) {
   std::wstring base_sddl;
   base_sddl += kOwnerAccountOperatorsSddl;
@@ -1378,6 +1803,263 @@ TEST_P(SecurityTest, GetSecurity_NoSecurityDescriptor) {
 }
 
 INSTANTIATE_TEST_CASE_P(SecurityTests, SecurityTest, kParams);
+
+class MemorySafetyTest : public FileSystemTestBase {};
+
+TEST_P(MemorySafetyTest, GlobalReleaseBufferOverflow) {
+  Device device(logger_);
+  ASSERT_TRUE(device.OpenGlobalDevice());
+  char buffer[800];
+  memset(buffer, 0x41, sizeof(buffer));
+  *(WORD*)buffer = 0x320;
+  *(WORD*)(buffer + 2) = 0x31a;
+  *(uint64_t*)(buffer + 776) = 0x4242424242424242;
+  ASSERT_FALSE(device.Control(0x222010, buffer, sizeof(buffer)));
+  ASSERT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+}
+
+TEST_P(MemorySafetyTest, EventStartTooSmall) {
+  Device device(logger_);
+  ASSERT_TRUE(device.OpenGlobalDevice());
+  EVENT_START buffer;
+  ULONG ioctl = IOCTL_EVENT_START;
+  ioctl =
+      (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_START : IOCTL_EVENT_START;
+  ASSERT_FALSE(device.Control(ioctl, &buffer, sizeof(buffer) - 1));
+  EXPECT_EQ(GetLastError(), ERROR_NO_SYSTEM_RESOURCES);
+}
+
+TEST_P(MemorySafetyTest, EventInfoTooSmall) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    EVENT_INFORMATION buffer;
+    ULONG ioctl = IOCTL_EVENT_INFO;
+    ioctl =
+        (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_INFO : IOCTL_EVENT_INFO;
+    EXPECT_FALSE(device->Control(ioctl, &buffer, sizeof(buffer) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, EventWriteTooSmall) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    EVENT_INFORMATION buffer;
+    ULONG ioctl = IOCTL_EVENT_WRITE;
+    ioctl =
+        (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_WRITE : IOCTL_EVENT_WRITE;
+    EXPECT_FALSE(device->Control(ioctl, &buffer, sizeof(buffer) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, MountdevNameTooSmall) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    MOUNTDEV_NAME buffer;
+    EXPECT_FALSE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
+                                               &buffer,
+                                               sizeof(buffer) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, MountdevNameStringBoundaries) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    MOUNTDEV_NAME buffer;
+    memset(&buffer, 0, sizeof(buffer));
+
+    // With no space for a name, it should give us the length.
+    EXPECT_FALSE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
+                                               &buffer));
+    EXPECT_EQ(GetLastError(), ERROR_MORE_DATA);
+    EXPECT_GT(buffer.NameLength, 0);
+
+    // With inadequate space for the whole name, it should only give us the
+    // length.
+    std::vector<char> full_buffer(sizeof(buffer) + buffer.NameLength
+                                  - sizeof(wchar_t));
+    const MOUNTDEV_NAME* full_buffer_data = reinterpret_cast<MOUNTDEV_NAME*>(
+        full_buffer.data());
+    EXPECT_FALSE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
+                                               full_buffer.data(),
+                                               full_buffer.size() - 1));
+    EXPECT_EQ(GetLastError(), ERROR_MORE_DATA);
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+
+    // With enough space, it should give us the name.
+    memset(full_buffer.data(), 0, full_buffer.size());
+    EXPECT_TRUE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
+                                              full_buffer.data(),
+                                              full_buffer.size()));
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+    std::wstring full_data_name = std::wstring(
+        full_buffer_data->Name, full_buffer_data->NameLength / sizeof(wchar_t));
+    ExpectValidDeviceName(full_data_name);
+
+    // It should not use extra space.
+    full_buffer.resize(full_buffer.size() + 1);
+    memset(full_buffer.data(), 0, full_buffer.size());
+    full_buffer[full_buffer.size() - 1] = 23;  // Arbitrary value.
+    full_buffer_data = reinterpret_cast<MOUNTDEV_NAME*>(full_buffer.data());
+    EXPECT_TRUE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
+                                              full_buffer.data(),
+                                              full_buffer.size()));
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+    full_data_name = std::wstring(
+        full_buffer_data->Name, full_buffer_data->NameLength / sizeof(wchar_t));
+    ExpectValidDeviceName(full_data_name);
+    EXPECT_EQ(full_buffer[full_buffer.size() - 1], 23);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, SuggestedLinkNameTooSmall) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    MOUNTDEV_SUGGESTED_LINK_NAME buffer;
+    memset(&buffer, 0, sizeof(buffer));
+
+    // With no space for a name, it should give us the length.
+    EXPECT_FALSE(device->ControlWithOutputOnly(
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, &buffer, sizeof(buffer) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    EXPECT_EQ(buffer.NameLength, 0);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, SuggestedLinkNameStringBoundaries) {
+  RunFS([&] (FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    ASSERT_NE(device, nullptr);
+    MOUNTDEV_SUGGESTED_LINK_NAME buffer;
+    memset(&buffer, 0, sizeof(buffer));
+    const std::wstring expected_name = std::wstring(L"\\DosDevices\\")
+        + mount_point_;
+
+    // With no space for a name, it should give us the length.
+    EXPECT_FALSE(device->ControlWithOutputOnly(
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, &buffer));
+    EXPECT_EQ(GetLastError(), ERROR_MORE_DATA);
+    EXPECT_EQ(buffer.NameLength, expected_name.size() * sizeof(wchar_t));
+    EXPECT_EQ(buffer.Name[0], 0);
+    EXPECT_TRUE(buffer.UseOnlyIfThereAreNoOtherLinks);
+
+    // With inadequate space for the whole name, it should only give us the
+    // length.
+    std::vector<char> full_buffer(sizeof(buffer) + buffer.NameLength
+                                  - sizeof(wchar_t));
+    const MOUNTDEV_SUGGESTED_LINK_NAME* full_buffer_data
+        = reinterpret_cast<MOUNTDEV_SUGGESTED_LINK_NAME*>(full_buffer.data());
+    EXPECT_FALSE(device->ControlWithOutputOnly(
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, full_buffer.data(),
+        full_buffer.size() - 1));
+    EXPECT_EQ(GetLastError(), ERROR_MORE_DATA);
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+    EXPECT_EQ(buffer.Name[0], 0);
+    EXPECT_TRUE(buffer.UseOnlyIfThereAreNoOtherLinks);
+
+    // With enough space, it should give us the name.
+    memset(full_buffer.data(), 0, full_buffer.size());
+    EXPECT_TRUE(device->ControlWithOutputOnly(
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, full_buffer.data(),
+        full_buffer.size()));
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+    std::wstring full_data_name = std::wstring(
+        full_buffer_data->Name, full_buffer_data->NameLength / sizeof(wchar_t));
+    EXPECT_EQ(full_data_name, expected_name);
+    EXPECT_TRUE(full_buffer_data->UseOnlyIfThereAreNoOtherLinks);
+
+    // It should not use extra space.
+    full_buffer.resize(full_buffer.size() + 1);
+    memset(full_buffer.data(), 0, full_buffer.size());
+    full_buffer[full_buffer.size() - 1] = 23;  // Arbitrary value.
+    full_buffer_data = reinterpret_cast<MOUNTDEV_SUGGESTED_LINK_NAME*>(
+        full_buffer.data());
+    EXPECT_TRUE(device->ControlWithOutputOnly(
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, full_buffer.data(),
+        full_buffer.size()));
+    EXPECT_EQ(full_buffer_data->NameLength, buffer.NameLength);
+    full_data_name = std::wstring(
+        full_buffer_data->Name, full_buffer_data->NameLength / sizeof(wchar_t));
+    EXPECT_EQ(full_data_name, expected_name);
+    EXPECT_TRUE(full_buffer_data->UseOnlyIfThereAreNoOtherLinks);
+    EXPECT_EQ(full_buffer[full_buffer.size() - 1], 23);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, VolumeMetricsTooSmall) {
+  RunFS([&](FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    VOLUME_METRICS metrics;
+    ULONG ioctl = IOCTL_GET_VOLUME_METRICS;
+    ioctl = (GetParam() & kUseFsctlEvents) ? FSCTL_GET_VOLUME_METRICS
+                                           : IOCTL_GET_VOLUME_METRICS;
+    EXPECT_FALSE(
+        device->ControlWithOutputOnly(ioctl, &metrics, sizeof(metrics) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    fs->Unmount();
+  });
+}
+
+INSTANTIATE_TEST_CASE_P(MemorySafetyTests, MemorySafetyTest,
+                        testing::Values(kCallbackSync));
+
+class DisabledFunctionTest : public FileSystemTestBase {};
+
+TEST_P(DisabledFunctionTest, IoctlGetVersion) {
+  CheckInvalidFunction(IOCTL_GET_VERSION);
+}
+
+TEST_P(DisabledFunctionTest, FsctlGetVersion) {
+  CheckInvalidFunction(FSCTL_GET_VERSION);
+}
+
+TEST_P(DisabledFunctionTest, IoctlEventMountpointList) {
+  CheckInvalidFunction(IOCTL_EVENT_MOUNTPOINT_LIST);
+}
+
+TEST_P(DisabledFunctionTest, FsctlEventMountpointList) {
+  CheckInvalidFunction(FSCTL_EVENT_MOUNTPOINT_LIST);
+}
+
+TEST_P(DisabledFunctionTest, IoctlRedirQueryPath) {
+  CheckInvalidFunction(IOCTL_REDIR_QUERY_PATH);
+}
+
+TEST_P(DisabledFunctionTest, IoctlRedirQueryPathEx) {
+  CheckInvalidFunction(IOCTL_REDIR_QUERY_PATH_EX);
+}
+
+TEST_P(DisabledFunctionTest, IoctlResetTimeout) {
+  CheckInvalidFunction(IOCTL_RESET_TIMEOUT);
+}
+
+TEST_P(DisabledFunctionTest, FsctlResetTimeout) {
+  CheckInvalidFunction(FSCTL_RESET_TIMEOUT);
+}
+
+TEST_P(DisabledFunctionTest, IoctlGetAccessToken) {
+  CheckInvalidFunction(IOCTL_GET_ACCESS_TOKEN);
+}
+
+TEST_P(DisabledFunctionTest, FsctlGetAccessToken) {
+  CheckInvalidFunction(FSCTL_GET_ACCESS_TOKEN);
+}
+
+INSTANTIATE_TEST_CASE_P(DisabledFunctionTests, DisabledFunctionTest,
+                        testing::Values(kCallbackSync));
 
 TEST_P(ReadWriteTest, Flush_Success) {
   const wchar_t path[] = L"\\test_Flush_Success";
@@ -1635,6 +2317,54 @@ TEST_P(NotificationTest, NotifyRename_Dir_NewParent) {
   });
 }
 
+TEST_P(NotificationTest, Delete_File_ViaCreateFlag_NotifyOnce) {
+  const wchar_t path[] = L"\\test_Delete_File_ViaCreateFlag_NotifyOnce";
+  callbacks_->SetUpFile(path);
+  const Observer* observer = callbacks_->AddObserver(path);
+  RunFS([&](FileSystem* fs) {
+    // Open two handles, one DELETE_ON_CLOSE one normal.
+    HANDLE doc_handle = CreateFile((mount_point_ + path).c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                                   CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, doc_handle);
+    HANDLE normal_handle =
+        CreateFile((mount_point_ + path).c_str(), GENERIC_READ,
+                   FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                   FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, normal_handle);
+    OVERLAPPED overlapped;
+    HANDLE handle = helper_.OpenFSRootForOverlapped(&overlapped);
+    char buffer[1024];
+    bool result = ReadDirectoryChangesW(handle, buffer, 1024, false,
+                                        FILE_NOTIFY_CHANGE_FILE_NAME, nullptr,
+                                        &overlapped, nullptr);
+    EXPECT_TRUE(result);
+    // Close the second handle and expect that we haven't yet sent a
+    // notification.
+    CloseHandle(normal_handle);
+    DWORD bytes_read = 0;
+    bool got_info =
+        GetOverlappedResult(handle, &overlapped, &bytes_read, false);
+    if (got_info) {
+      EXPECT_GE(bytes_read, sizeof(FILE_NOTIFY_INFORMATION));
+      const auto info =
+          reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(buffer);
+      ADD_FAILURE() << "Unexpected file notification. "
+                    << "Action: " << info->Action << " File: "
+                    << std::wstring(info->FileName,
+                                    info->FileNameLength / sizeof(wchar_t));
+    }
+    EXPECT_TRUE(callbacks_->file_exists(path));
+    // Close the first handle and ensure that the file is deleted.
+    CloseHandle(doc_handle);
+    CheckNotification(handle, buffer, &overlapped, FILE_ACTION_REMOVED,
+                      L"test_Delete_File_ViaCreateFlag_NotifyOnce");
+    EXPECT_FALSE(callbacks_->file_exists(path));
+    CloseHandle(overlapped.hEvent);
+    fs->Unmount();
+  });
+}
+
 // Below are variants of the above that test notifications that are
 // automatically sent by the driver in response to a rename/move being done on
 // the dokan FS from some app. The above ones are for when the owner of the
@@ -1747,6 +2477,159 @@ TEST_P(NotificationTest, ImplicitRenameNotification_Dir_NewParent) {
 }
 
 INSTANTIATE_TEST_CASE_P(NotificationTests, NotificationTest, kParams);
+
+class DeviceIOBufferTest : public FileSystemTestBase {};
+
+TEST_P(DeviceIOBufferTest, Large_NtSetInformationFile) {
+  const wchar_t file_path[] = L"\\foo.txt";
+  callbacks_->SetUpFile(L"\\foo.txt", "foo");
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_ALL,
+                   FILE_SHARE_READ, nullptr, OPEN_ALWAYS, 0, nullptr);
+    IO_STATUS_BLOCK status_block = {};
+    int buffer_size = 65536;
+    void* buffer = malloc(buffer_size);
+    memset(buffer, 0x00, buffer_size);
+    NTSTATUS status = NtSetInformationFile(
+        handle, &status_block, buffer, buffer_size, FileDispositionInformation);
+    EXPECT_EQ(status, STATUS_INVALID_PARAMETER);
+
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    VOLUME_METRICS metrics;
+    EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
+    EXPECT_GT(metrics.LargeIRPRegistrationCanceled, 0);
+
+    fs->Unmount();
+  });
+}
+
+INSTANTIATE_TEST_CASE_P(DeviceIOBufferTests, DeviceIOBufferTest, kParams);
+
+class DriverLogsTest : public FileSystemTestBase {
+ public:
+  static void GenerateActivity(const std::wstring& mount_point,
+                               const std::wstring& file_path) {
+    HANDLE handle =
+        CreateFile((mount_point + file_path).c_str(), GENERIC_ALL,
+                   FILE_SHARE_READ, nullptr, OPEN_ALWAYS, 0, nullptr);
+    char buffer[4] = {0};
+    DWORD bytes_read = 0;
+    bool result = ReadFile(handle, buffer, 3, &bytes_read, NULL);
+    EXPECT_TRUE(result);
+    CloseHandle(handle);
+  }
+
+  static bool HasDriverLogs(const std::vector<std::string>& trace) {
+    return std::find_if(trace.begin(), trace.end(), [](const std::string& str) {
+             return str.find("[DokanDispatchCreate]") != std::string::npos;
+           }) != trace.end();
+  }
+};
+
+TEST_P(DriverLogsTest, DispatchDriverLogs) {
+  if (!(GetParam() & kDispatchDriverLogs)) {
+    return;
+  }
+
+  const wchar_t file_path[] = L"\\foo.txt";
+  callbacks_->SetUpFile(file_path, "foo");
+  RunFS([&](FileSystem* fs) {
+    GenerateActivity(mount_point_, file_path);
+    fs->Unmount();
+    EXPECT_TRUE(HasDriverLogs(dynamic_cast<TestLogger*>(logger_)->GetTrace()));
+  });
+}
+
+TEST_P(DriverLogsTest, MultiDispatchDriverLogs) {
+  if (!(GetParam() & kDispatchDriverLogs)) {
+    return;
+  }
+
+  const wchar_t file_path[] = L"\\foo.txt";
+  callbacks_->SetUpFile(file_path, "foo");
+  RunFS([&](FileSystem* fs) {
+    uint8_t activity_count = 10;
+    for (int x = 0; x < activity_count; ++x) {
+      GenerateActivity(mount_point_, file_path);
+    }
+    fs->Unmount();
+    std::vector<std::string> trace =
+        dynamic_cast<TestLogger*>(logger_)->GetTrace();
+    EXPECT_TRUE(
+        std::count_if(trace.begin(), trace.end(), [](const std::string& str) {
+          return str.find("[DokanDispatchCreate]") != std::string::npos;
+        }) > activity_count);
+  });
+}
+
+TEST_P(DriverLogsTest, OnlyVolumeLogsReceived) {
+  if (!(GetParam() & kDispatchDriverLogs)) {
+    return;
+  }
+
+  uint8_t activity_count = 10;
+  std::thread t1([&] {
+    FileSystemTestHelper helper1(L"Q:", GetParam());
+    const wchar_t file_path[] = L"\\foo_OnlyVolumeLogsReceived.txt";
+    helper1.callbacks_->SetUpFile(file_path, "foo");
+    helper1.RunFS(options_, [&](FileSystem* fs) {
+      for (int x = 0; x < activity_count; ++x) {
+        GenerateActivity(helper1.mount_point_, file_path);
+      }
+      fs->Unmount();
+      std::vector<std::string> trace =
+          dynamic_cast<TestLogger*>(helper1.logger_.get())->GetTrace();
+      EXPECT_TRUE(HasDriverLogs(trace));
+      auto foo_it =
+          std::find_if(trace.begin(), trace.end(), [&](const std::string& str) {
+            return str.find("\\foo_OnlyVolumeLogsReceived.txt") != std::string::npos;
+          });
+      auto bar_it =
+          std::find_if(trace.begin(), trace.end(), [&](const std::string& str) {
+            return str.find("\\bar_OnlyVolumeLogsReceived.txt") != std::string::npos;
+          });
+      if (bar_it != trace.end()) {
+        DOKAN_LOG_(ERROR) << *foo_it;
+      }
+      EXPECT_TRUE(foo_it != trace.end());
+      EXPECT_TRUE(bar_it == trace.end());
+    });
+    EXPECT_TRUE(helper1.unmounted());
+  });
+  std::thread t2([&] {
+    FileSystemTestHelper helper2(L"R:", GetParam());
+    const wchar_t file_path[] = L"\\bar_OnlyVolumeLogsReceived.txt";
+    helper2.callbacks_->SetUpFile(file_path, "bar");
+    helper2.RunFS(options_, [&](FileSystem* fs) {
+      for (int x = 0; x < activity_count; ++x) {
+        GenerateActivity(helper2.mount_point_, file_path);
+      }
+      fs->Unmount();
+      std::vector<std::string> trace =
+          dynamic_cast<TestLogger*>(helper2.logger_.get())->GetTrace();
+      EXPECT_TRUE(HasDriverLogs(trace));
+      auto foo_it =
+          std::find_if(trace.begin(), trace.end(), [&](const std::string& str) {
+            return str.find("\\foo_OnlyVolumeLogsReceived.txt") != std::string::npos;
+          });
+      auto bar_it =
+          std::find_if(trace.begin(), trace.end(), [&](const std::string& str) {
+            return str.find("\\bar_OnlyVolumeLogsReceived.txt") != std::string::npos;
+          });
+      if (foo_it != trace.end()) {
+        DOKAN_LOG_(ERROR) << *foo_it;
+      }
+      EXPECT_TRUE(foo_it == trace.end());
+      EXPECT_TRUE(bar_it != trace.end());
+    });
+    EXPECT_TRUE(helper2.unmounted());
+  });
+  t1.join();
+  t2.join();
+}
+
+INSTANTIATE_TEST_CASE_P(DriverLogsTests, DriverLogsTest, kParams);
 
 }  // namespace test
 }  // namespace dokan

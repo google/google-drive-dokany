@@ -20,13 +20,16 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #ifndef DOKAN_DEVICE_H_
 #define DOKAN_DEVICE_H_
 
+#include <windows.h>
+
 #include <memory>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 #include "api.h"
+#include "hex_util.h"
 #include "logger.h"
+#include "util.h"
 
 namespace dokan {
 
@@ -38,6 +41,11 @@ class Device {
 
   Device(const Device&) = delete;
   Device& operator=(const Device&) = delete;
+
+  // Opens the Google FS global device, which logs errors to the given
+  // logger. If successful, the handle stays open until the Device object is
+  // destroyed.
+  DOKANCC_API bool OpenGlobalDevice();
 
   // Opens the device with the given name, which logs errors to the given
   // logger. If successful, the handle stays open until the Device object is
@@ -88,21 +96,45 @@ class Device {
     return Control(ioctl, input, reinterpret_cast<char*>(output), sizeof(U));
   }
 
+  // Invokes a control function on the device that takes no input and returns
+  // a fixed-size output object of type T.
+  template <typename T>
+  bool ControlWithOutputOnly(ULONG ioctl, T* output) {
+    return ControlWithOutputOnly(ioctl, output, sizeof(T));
+  }
+
+  // Invokes a control function on the device that takes no input and returns
+  // a variable-size output object of type T.
+  template <typename T>
+  bool ControlWithOutputOnly(ULONG ioctl, T* output, ULONG output_size) {
+    return Control(ioctl, /*input=*/static_cast<const char*>(nullptr),
+                   /*input_size=*/0, reinterpret_cast<char*>(output),
+                   output_size);
+  }
+
   // Invokes a control function on the device that takes input and returns data
   // of the specified size.
   template <typename T>
   bool Control(ULONG ioctl, const T& input, char* output, ULONG output_size) {
+    return Control(ioctl, &input, sizeof(input), output, output_size);
+  }
+
+  // Invokes a control function on the device that takes input and returns data
+  // of the specified size.
+  template <typename T>
+  bool Control(ULONG ioctl, const T* input, ULONG input_size, char* output,
+               ULONG output_size) {
     DWORD bytes_returned = 0;
-    bool result = DeviceIoControl(handle_, ioctl, (LPVOID)&input, sizeof(input),
+    bool result = DeviceIoControl(handle_, ioctl, (LPVOID)input, input_size,
                                   output, output_size, &bytes_returned,
                                   nullptr);
     if (!result) {
-      DOKAN_LOG_ERROR(logger_, "IOCTL 0x%x failed on device %S; error: %u",
-                      ioctl, name_.c_str(), GetLastError());
+      DOKAN_LOG_(ERROR) << "IOCTL " << Hex(ioctl) << " failed on device "
+                        << name_ << "; error: " << GetLastError();
     } else if (bytes_returned != output_size) {
-      DOKAN_LOG_INFO(logger_,
-                     "IOCTL 0x%x on device %S returned %u bytes; expected %u",
-                     ioctl, name_.c_str(), bytes_returned, output_size);
+      DOKAN_LOG_(INFO) << "IOCTL " << Hex(ioctl) << " on device " << name_
+                       << " returned " << bytes_returned << " bytes; expected "
+                       << output_size;
     }
     return result;
   }
@@ -119,12 +151,15 @@ class Device {
   DOKANCC_API bool GetAsyncResult(OVERLAPPED* overlapped,
                                   DWORD* actual_output_size, DWORD* error);
 
+  void SetDesiredAccess(DWORD desired_access);
+
  private:
   DOKANCC_API void LogGenericResult(ULONG ioctl);
 
   std::wstring name_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   Logger* const logger_;
+  DWORD desired_access_ = GENERIC_READ | GENERIC_WRITE;
 };
 
 }  // namespace dokan
