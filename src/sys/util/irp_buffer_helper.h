@@ -36,7 +36,7 @@ PVOID GetInputBuffer(_In_ PIRP Irp);
 
 #define GET_IRP_GENERIC_BUFFER_EX(Irp, Buffer, SizeCompare, Exit, Status,    \
                                   InformationSize)                           \
-  do {                                                                       \
+  {                                                                          \
     ULONG irpBufferLen = GetProvidedInputSize(Irp);                          \
     (Buffer) = GetInputBuffer(Irp);                                          \
     ASSERT((Buffer) != NULL);                                                \
@@ -47,7 +47,7 @@ PVOID GetInputBuffer(_In_ PIRP Irp);
       (Buffer) = NULL;                                                       \
       Exit((Irp), (Status), (InformationSize));                              \
     }                                                                        \
-  } while (0)
+  }
 
 #define GET_IRP_GENERIC_BUFFER(Irp, Buffer, CompareSize) \
   GET_IRP_GENERIC_BUFFER_EX(Irp, Buffer, CompareSize, DOKAN_EXIT_NONE, 0, 0)
@@ -168,8 +168,8 @@ inline BOOLEAN PrepareOutputHelper(_Inout_ PIRP Irp,
 //
 // If the buffer is too small, this function's only effect is to optionally
 // increase the IRP's Information value, if UpdateInformationOnFailure is TRUE.
-BOOLEAN ExtendOutputBySize(_Inout_ PIRP Irp, _In_ ULONG AdditionalSize,
-                           _In_ BOOLEAN UpdateInformationOnFailure);
+BOOLEAN ExtendOutputBufferBySize(_Inout_ PIRP Irp, _In_ ULONG AdditionalSize,
+                                 _In_ BOOLEAN UpdateInformationOnFailure);
 
 // Given an IRP that is returning a struct ending with a variable-sized string,
 // i.e.
@@ -189,8 +189,8 @@ BOOLEAN ExtendOutputBySize(_Inout_ PIRP Irp, _In_ ULONG AdditionalSize,
 // PrepareOutputWithSize(Irp, sizeof(StructType), ...);
 //
 // This function extends the output buffer if necessary, as if by
-// ExtendOutputBySize, returning FALSE if it fails. If extending the buffer
-// succeeds, this function populates Dest from Str->Buffer.
+// ExtendOutputBufferBySize, returning FALSE if it fails. If extending the
+// buffer succeeds, this function populates Dest from Str->Buffer.
 //
 // The FillSpaceWithPartialString flag enables the less frequently desired
 // behavior of copying the max possible amount of the string when the output

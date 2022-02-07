@@ -54,26 +54,6 @@ void FillAttributeTagInfo(const FileInfo& source,
   dest->ReparseTag = 0;
 }
 
-NTSTATUS FillNetworkPhysicalNameInfo(
-    EVENT_CONTEXT* request,
-    EVENT_INFORMATION* reply,
-    ULONG* used_buffer_size) {
-  if (reply->BufferLength < sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION) +
-        request->Operation.File.FileNameLength - sizeof(wchar_t)) {
-    return STATUS_BUFFER_OVERFLOW;
-  }
-  auto dest = reinterpret_cast<FILE_NETWORK_PHYSICAL_NAME_INFORMATION*>(
-      reply->Buffer);
-  dest->FileNameLength = request->Operation.File.FileNameLength;
-  memcpy(dest->FileName, request->Operation.File.FileName,
-         request->Operation.File.FileNameLength);
-  // The one char in the fixed-size area is subtracted from the dynamic length.
-  assert(dest->FileNameLength != 0);
-  *used_buffer_size = sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION) +
-      request->Operation.File.FileNameLength - sizeof(wchar_t);
-  return STATUS_SUCCESS;
-}
-
 }  // namespace
 
 void FileInfoHandler::FillStandardInfo(const FileInfo& source,
@@ -89,46 +69,21 @@ void FileInfoHandler::FillNetworkOpenInfo(const FileInfo& source,
   FillSizeAndEofInfo(source, dest);
 }
 
-NTSTATUS FileInfoHandler::FillAllInfo(
-    EVENT_CONTEXT* request,
-    const FileInfo& get_info_result,
-    EVENT_INFORMATION* reply,
-    ULONG* used_buffer_size) {
+NTSTATUS FileInfoHandler::FillAllInfo(EVENT_CONTEXT* request,
+                                      const FileInfo& get_info_result,
+                                      EVENT_INFORMATION* reply,
+                                      ULONG* used_buffer_size) {
   const ULONG buffer_size = reply->BufferLength;
-  if (buffer_size < sizeof(FILE_ALL_INFORMATION)) {
+  if (buffer_size < FIELD_OFFSET(FILE_ALL_INFORMATION,
+                                 NameInformation.FileName)) {
     return STATUS_BUFFER_OVERFLOW;
   }
   auto dest = reinterpret_cast<FILE_ALL_INFORMATION*>(reply->Buffer);
   FillBasicInfo(get_info_result, &dest->BasicInformation);
   FillStandardInfo(get_info_result, &dest->StandardInformation);
-
-  // TODO(drivefs-team): The driver should start handling the
-  // FILE_NAME_INFORMATION piece in the FileAllInformation case like it does
-  // when only a name-related info class is requested. We can then delete the
-  // code below. Note that it does handle the FILE_POSITION_INFORMATION either
-  // way.
-
-  if (buffer_size < sizeof(FILE_ALL_INFORMATION) +
-      request->Operation.File.FileNameLength) {
-    // Fill the fixed-size portion of the FILE_NAME_INFORMATION structure if
-    // that's all we can fit. That includes the length and first char. The old
-    // code doesn't try to fit some chars in the var-sized area.
-    dest->NameInformation.FileNameLength =
-        request->Operation.File.FileNameLength;
-    dest->NameInformation.FileName[0] =
-        request->Operation.File.FileName[0];
-    *used_buffer_size = sizeof(FILE_ALL_INFORMATION);
-    return STATUS_BUFFER_OVERFLOW;
-  }
-  dest->NameInformation.FileNameLength =
-      request->Operation.File.FileNameLength;
-  memcpy(dest->NameInformation.FileName, request->Operation.File.FileName,
-         request->Operation.File.FileNameLength);
-
-  // The one char in the fixed-size area is subtracted from the dynamic length.
-  assert(dest->NameInformation.FileNameLength != 0);
-  *used_buffer_size = sizeof(FILE_ALL_INFORMATION) +
-      dest->NameInformation.FileNameLength - sizeof(wchar_t);
+  dest->InternalInformation.IndexNumber.QuadPart = get_info_result.file_index;
+  *used_buffer_size =
+      FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName);
   return STATUS_SUCCESS;
 }
 
@@ -169,6 +124,17 @@ NTSTATUS FileInfoHandler::HandleGetInfoReply(
           get_info_result, reply, used_buffer_size);
     case FileAllInformation:
       return FillAllInfo(request, get_info_result, reply, used_buffer_size);
+    case FileIdInformation:
+      return FillFixedSizeInfo<FILE_ID_INFORMATION>(
+          std::bind(&FileInfoHandler::FillIdInfo<FILE_ID_INFORMATION>, this, _1,
+                    _2),
+          get_info_result, reply, used_buffer_size);
+    case FileInternalInformation:
+      return FillFixedSizeInfo<FILE_INTERNAL_INFORMATION>(
+          std::bind(
+              &FileInfoHandler::FillInternalInfo<FILE_INTERNAL_INFORMATION>,
+              this, _1, _2),
+          get_info_result, reply, used_buffer_size);
     default:
       assert(false);
   }
@@ -186,42 +152,15 @@ void FileInfoHandler::GetInfo(
          info_class != FileNormalizedNameInformation &&
          info_class != FilePositionInformation);
 
-  // We only send back the volume serial number and not an ID for the file. This
-  // differs from the C library, but we currently don't think it's useful to
-  // even support having the GetInfo callback produce a file ID.
-  if (info_class == FileIdInformation) {
-    auto data = reinterpret_cast<FILE_ID_INFORMATION*>(
-        reply->Buffer);
-    data->VolumeSerialNumber = startup_options_->volume_serial_number;
-    reply_fn(STATUS_SUCCESS, sizeof(FILE_ID_INFORMATION), std::move(reply));
-    return;
-  }
-
-  // This is a no-op since we don't support IDs for files.
-  if (info_class == FileInternalInformation) {
-    reply_fn(STATUS_SUCCESS, sizeof(FILE_INTERNAL_INFORMATION),
-             std::move(reply));
-    return;
-  }
-
-  // Surprisingly, this does get used for non-network file systems. It may only
-  // be filter drivers that do it in practice.
-  // TODO(drivefs-team): Make the driver handle this one.
-  if (info_class == FileNetworkPhysicalNameInformation) {
-    ULONG used_buffer_size = 0;
-    NTSTATUS status = FillNetworkPhysicalNameInfo(request, reply.get(),
-                                                  &used_buffer_size);
-    reply_fn(status, used_buffer_size, std::move(reply));
-    return;
-  }
-
   // These are the info classes that require actually invoking
   // FileSystemCallbacks.
   if (info_class == FileBasicInformation ||
       info_class == FileStandardInformation ||
       info_class == FileAllInformation ||
       info_class == FileAttributeTagInformation ||
-      info_class == FileNetworkOpenInformation) {
+      info_class == FileNetworkOpenInformation ||
+      info_class == FileIdInformation ||
+      info_class == FileInternalInformation) {
     FileInfo* raw_get_info_result = new FileInfo{0};
     EVENT_INFORMATION* raw_reply = reply.release();
     callbacks_->GetInfo(handle, raw_get_info_result, [=](NTSTATUS status) {

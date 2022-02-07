@@ -331,22 +331,7 @@ PCHAR DokanGetMinorFunctionStr(UCHAR MajorFunction, UCHAR MinorFunction) {
       }
     }
     case IRP_MJ_DEVICE_CONTROL: {
-      switch (MinorFunction) {
-        CASE_STR(IOCTL_GET_VERSION)
-        CASE_STR(IOCTL_SET_DEBUG_MODE)
-        CASE_STR(IOCTL_EVENT_WAIT)
-        CASE_STR(IOCTL_EVENT_INFO)
-        CASE_STR(IOCTL_EVENT_RELEASE)
-        CASE_STR(IOCTL_EVENT_START)
-        CASE_STR(IOCTL_EVENT_WRITE)
-        CASE_STR(IOCTL_SERVICE_WAIT)
-        CASE_STR(IOCTL_RESET_TIMEOUT)
-        CASE_STR(IOCTL_GET_ACCESS_TOKEN)
-        CASE_STR(IOCTL_EVENT_MOUNTPOINT_LIST)
-        CASE_STR(IOCTL_GET_VOLUME_METRICS)
-        default:
-          return "MN_UNKNOWN";
-      }
+      return "MN_UNKNOWN";
     }
   }
   return "";
@@ -486,32 +471,19 @@ PCHAR DokanGetCreateInformationStr(ULONG_PTR Information) {
 
 PCHAR DokanGetIoctlStr(ULONG ControlCode) {
   switch (ControlCode) {
-    CASE_STR(IOCTL_GET_VERSION)
     CASE_STR(FSCTL_GET_VERSION)
-    CASE_STR(IOCTL_SET_DEBUG_MODE)
     CASE_STR(FSCTL_SET_DEBUG_MODE)
-    CASE_STR(IOCTL_EVENT_WAIT)
     CASE_STR(FSCTL_EVENT_WAIT)
-    CASE_STR(IOCTL_EVENT_INFO)
     CASE_STR(FSCTL_EVENT_INFO)
-    CASE_STR(IOCTL_EVENT_RELEASE)
     CASE_STR(FSCTL_EVENT_RELEASE)
-    CASE_STR(IOCTL_EVENT_START)
     CASE_STR(FSCTL_EVENT_START)
-    CASE_STR(IOCTL_EVENT_WRITE)
     CASE_STR(FSCTL_EVENT_WRITE)
-    CASE_STR(IOCTL_SERVICE_WAIT)
-    CASE_STR(FSCTL_SERVICE_WAIT)
-    CASE_STR(IOCTL_RESET_TIMEOUT)
     CASE_STR(FSCTL_RESET_TIMEOUT)
-    CASE_STR(IOCTL_GET_ACCESS_TOKEN)
     CASE_STR(FSCTL_GET_ACCESS_TOKEN)
-    CASE_STR(IOCTL_EVENT_MOUNTPOINT_LIST)
     CASE_STR(FSCTL_EVENT_MOUNTPOINT_LIST)
     CASE_STR(FSCTL_ACTIVATE_KEEPALIVE)
     CASE_STR(FSCTL_NOTIFY_PATH)
     CASE_STR(FSCTL_VOLUME_LABEL)
-    CASE_STR(IOCTL_GET_VOLUME_METRICS)
     CASE_STR(FSCTL_GET_VOLUME_METRICS)
 #include "ioctl.inc"
   }
@@ -570,7 +542,9 @@ VOID PushDokanLogEntry(_In_opt_ PVOID RequestContext, _In_ PCSTR Format, ...) {
     ++g_DokanLogEntryList.NumberOfCachedEntries;
     InsertTailList(&g_DokanLogEntryList.Log, &logEntry->ListEntry);
 
-    if (requestContext && requestContext->Vcb && requestContext->Vcb->Dcb) {
+    if (requestContext && requestContext->Vcb && requestContext->Vcb->Dcb &&
+        !IsUnmountPendingVcb(requestContext->Vcb) &&
+        requestContext->Vcb->HasEventWait) {
       PopDokanLogEntry(requestContext->Vcb);
     }
   } __finally {

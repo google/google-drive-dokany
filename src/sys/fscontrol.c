@@ -458,6 +458,71 @@ DokanGlobalUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+VOID PullEvents(__in PREQUEST_CONTEXT RequestContext,
+                __in PIRP_LIST NotifyEvent) {
+  PDRIVER_EVENT_CONTEXT workItem = NULL;
+  PDRIVER_EVENT_CONTEXT alreadySeenWorkItem = NULL;
+  PLIST_ENTRY workItemListEntry = NULL;
+  KIRQL workQueueIrql;
+  ULONG workItemBytes = 0;
+  ULONG currentIoctlBufferBytesRemaining =
+      RequestContext->IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+  PCHAR currentIoctlBuffer =
+      (PCHAR)RequestContext->Irp->AssociatedIrp.SystemBuffer;
+
+  ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+  KeAcquireSpinLock(&NotifyEvent->ListLock, &workQueueIrql);
+  if (IsUnmountPendingVcb(RequestContext->Vcb)) {
+    KeReleaseSpinLock(&NotifyEvent->ListLock, workQueueIrql);
+    return;
+  }
+  while (!IsListEmpty(&NotifyEvent->ListHead)) {
+    workItemListEntry = RemoveHeadList(&NotifyEvent->ListHead);
+    workItem =
+        CONTAINING_RECORD(workItemListEntry, DRIVER_EVENT_CONTEXT, ListEntry);
+    workItemBytes = workItem->EventContext.Length;
+    // Buffer is not specified or short of length (this may mean we filled the
+    // space in one of the DLL's buffers in batch mode). Put the IRP back in
+    // the work queue; it will have to go in a different buffer.
+    if (currentIoctlBufferBytesRemaining < workItemBytes) {
+      InsertTailList(&NotifyEvent->ListHead, &workItem->ListEntry);
+      if (alreadySeenWorkItem == workItem) {
+        // We have reached the end of the list
+        break;
+      }
+      if (!alreadySeenWorkItem) {
+        alreadySeenWorkItem = workItem;
+      }
+      continue;
+    }
+    // Send the work item back in the response to the current IOCTL.
+    RtlCopyMemory(currentIoctlBuffer, &workItem->EventContext, workItemBytes);
+    currentIoctlBufferBytesRemaining -= workItemBytes;
+    currentIoctlBuffer += workItemBytes;
+    RequestContext->Irp->IoStatus.Information += workItemBytes;
+    ExFreePool(workItem);
+    if (!RequestContext->Dcb->AllowIpcBatching) {
+      break;
+    }
+  }
+  if (IsListEmpty(&NotifyEvent->ListHead)) {
+    KeClearEvent(&NotifyEvent->NotEmpty);
+  }
+  KeReleaseSpinLock(&NotifyEvent->ListLock, workQueueIrql);
+  RequestContext->Irp->IoStatus.Status = STATUS_SUCCESS;
+}
+
+NTSTATUS DokanEventWait(__in PREQUEST_CONTEXT RequestContext) {
+  RequestContext->Vcb->HasEventWait = TRUE;
+  if (RequestContext->Dcb->PullEventAhead) {
+    PullEvents(RequestContext, &RequestContext->Dcb->NotifyEvent);
+    if (RequestContext->Irp->IoStatus.Information) {
+      return STATUS_SUCCESS;
+    }
+  }
+  return DokanRegisterPendingIrpForEvent(RequestContext);
+}
+
 NTSTATUS
 DokanDiskUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   REQUEST_CONTEXT requestContext = *RequestContext;
@@ -466,7 +531,7 @@ DokanDiskUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   requestContext.Vcb = requestContext.Dcb->Vcb;
   switch (RequestContext->IrpSp->Parameters.FileSystemControl.FsControlCode) {
     case FSCTL_EVENT_WAIT:
-      return DokanRegisterPendingIrpForEvent(&requestContext);
+      return DokanEventWait(&requestContext);
     case FSCTL_EVENT_INFO:
       return DokanCompleteIrp(&requestContext);
     case FSCTL_EVENT_RELEASE:
@@ -585,6 +650,7 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
   HANDLE handle = 0;
   PUNICODE_STRING directoryStr = NULL;
   NTSTATUS status = STATUS_SUCCESS;
+  PIRP topLevelIrp = NULL;
   DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject,
                     IRP_MJ_FILE_SYSTEM_CONTROL);
 
@@ -597,6 +663,11 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
       DokanLogError(&logger, status, L"Failed to change prefix for \"%wZ\"\n",
                     Path);
       __leave;
+    }
+
+    if (RequestContext->IsTopLevelIrp) {
+      topLevelIrp = IoGetTopLevelIrp();
+      IoSetTopLevelIrp(NULL);
     }
 
     // Open the directory as \??\C:\foo
@@ -632,6 +703,9 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
     }
     if (handle) {
       ZwClose(handle);
+    }
+    if (topLevelIrp) {
+      IoSetTopLevelIrp(topLevelIrp);
     }
   }
 
@@ -755,6 +829,8 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
   }
 
   InitializeListHead(&vcb->NextFCB);
+  RtlInitializeGenericTableAvl(&vcb->FcbTable, DokanCompareFcb,
+                               DokanAllocateFcbAvl, DokanFreeFcbAvl, vcb);
 
   InitializeListHead(&vcb->DirNotifyList);
   FsRtlNotifyInitializeSync(&vcb->NotifySync);
@@ -832,9 +908,7 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
       }
       ExReleaseResourceLite(&dcb->Global->MountManagerLock);
     }
-  }
-
-  if (isDriveLetter && !dcb->ResolveMountConflicts) {
+  } else if (isDriveLetter) {
     // When using the new semantics, the arrival notification above should get
     // the right thing to happen. That will query us for the desired mount point
     // and then make an assignment. It doesn't work with the old semantics

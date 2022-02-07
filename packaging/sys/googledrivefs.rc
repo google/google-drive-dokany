@@ -18,8 +18,8 @@
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 3,460,2100,0
- PRODUCTVERSION 3,460,2100,0
+ FILEVERSION 3,758,1741,0
+ PRODUCTVERSION 3,758,1741,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -36,12 +36,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Google, Inc."
             VALUE "FileDescription", "Google Drive File System Driver"
-            VALUE "FileVersion", "3.460.2100.0"
-            VALUE "InternalName", "googledrivefs3460.sys"
+            VALUE "FileVersion", "3.758.1741.0"
+            VALUE "InternalName", "googledrivefs3758.sys"
             VALUE "LegalCopyright", "Copyright (C) 2016 Google, Inc., Copyright (C) 2016 Dokan Project"
-            VALUE "OriginalFilename", "googledrivefs3460.sys"
+            VALUE "OriginalFilename", "googledrivefs3758.sys"
             VALUE "ProductName", "Google Drive File Stream"
-            VALUE "ProductVersion", "3.460.2100.0"
+            VALUE "ProductVersion", "3.758.1741.0"
         END
     END
     BLOCK "VarFileInfo"

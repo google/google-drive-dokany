@@ -50,7 +50,7 @@ class Device {
   // Opens the device with the given name, which logs errors to the given
   // logger. If successful, the handle stays open until the Device object is
   // destroyed.
-  DOKANCC_API bool Open(const std::wstring& name);
+  DOKANCC_API bool Open(const std::wstring& name, DWORD desired_access = 0);
 
   bool is_open() const {
     return handle_ != INVALID_HANDLE_VALUE;
@@ -151,15 +151,12 @@ class Device {
   DOKANCC_API bool GetAsyncResult(OVERLAPPED* overlapped,
                                   DWORD* actual_output_size, DWORD* error);
 
-  void SetDesiredAccess(DWORD desired_access);
-
  private:
   DOKANCC_API void LogGenericResult(ULONG ioctl);
 
   std::wstring name_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   Logger* const logger_;
-  DWORD desired_access_ = GENERIC_READ | GENERIC_WRITE;
 };
 
 }  // namespace dokan

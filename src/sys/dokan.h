@@ -184,6 +184,7 @@ typedef struct _FSD_IDENTIFIER {
 
 typedef struct _IRP_LIST {
   LIST_ENTRY ListHead;
+  BOOLEAN EventEnabled;
   KEVENT NotEmpty;
   KSPIN_LOCK ListLock;
 } IRP_LIST, *PIRP_LIST;
@@ -195,9 +196,6 @@ typedef struct _DOKAN_GLOBAL {
   PDEVICE_OBJECT FsDiskDeviceObject;
   PDEVICE_OBJECT FsCdDeviceObject;
   ULONG MountId;
-  // the list of waiting IRP for mount service
-  IRP_LIST PendingService;
-  IRP_LIST NotifyService;
 
   PKTHREAD DeviceDeleteThread;
 
@@ -282,12 +280,6 @@ typedef struct _DokanDiskControlBlock {
   IO_REMOVE_LOCK RemoveLock;
   BOOLEAN LockDebugEnabled;
 
-  // Whether DOKAN_OPTION_RESOLVE_MOUNT_CONFLICTS was specified in the mount
-  // flags (see the comment for the flag). The logic to force unmounting of an
-  // existing dokan drive is in DokanEventStart. Other functions should treat
-  // this as meaning "let the mount manager resolve any remaining conflicts, and
-  // don't presume there aren't any."
-  BOOLEAN ResolveMountConflicts;
   // If true, we know the requested mount point is occupied by a dokan drive we
   // can't remove, so force the mount manager to auto-assign a different drive
   // letter.
@@ -339,18 +331,37 @@ typedef struct _DokanDiskControlBlock {
   // repeatedly rebuilding state that they attach to the FCB header.
   ULONG FcbGarbageCollectionIntervalMs;
 
+  // Disable FileNetworkPhysicalNameInformation query on files. The
+  // FileInformationClass query will directly result in STATUS_INVALID_PARAMETER
+  // failure instead of being resolved by the driver.
+  BOOLEAN DisableNetworkPhysicalQuery;
+
+  // Allow I/O requests to be pulled directly by FSCTL_EVENT_WAIT when available
+  // instead of waiting to be woken up by the system thread.
+  BOOLEAN PullEventAhead;
+
+  // Store the DokanFCB instances in the Avl table instead of the LIST_ENTRY.
+  BOOLEAN StoreFcbInAvlTable;
+
 } DokanDCB, *PDokanDCB;
 
 #define MAX_PATH 260
 
 typedef struct _DOKAN_CONTROL {
-  ULONG Type;            // File System Type
-  WCHAR MountPoint[MAX_PATH]; // Mount Point
+  // File System Type
+  ULONG Type;
+  // Mount point. Can be "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS)
+  WCHAR MountPoint[MAX_PATH];
+  // UNC name used for network volume
   WCHAR UNCName[64];
-  WCHAR DeviceName[64];        // Disk Device Name
-  PDokanDCB Dcb;  // Always set on MOUNT_ENTRY
-  PDEVICE_OBJECT DiskDeviceObject;  // Always set on MOUNT_ENTRY
-  PDEVICE_OBJECT VolumeDeviceObject;  // NULL until fully mounted
+  // Disk Device Name
+  WCHAR DeviceName[64];
+  // Always set on MOUNT_ENTRY
+  PDokanDCB Dcb;
+  // Always set on MOUNT_ENTRY
+  PDEVICE_OBJECT DiskDeviceObject;
+  // NULL until fully mounted
+  PDEVICE_OBJECT VolumeDeviceObject;
 } DOKAN_CONTROL, *PDOKAN_CONTROL;
 
 typedef struct _MOUNT_ENTRY {
@@ -390,6 +401,14 @@ typedef struct _DokanVolumeControlBlock {
   PDEVICE_OBJECT DeviceObject;
   PDokanDCB Dcb;
   LIST_ENTRY NextFCB;
+
+  // Avl Table storing the DokanFCB instances.
+  RTL_AVL_TABLE FcbTable;
+  // Lookaside list for the FCB Avl table node containing the Avl header and a
+  // pointer to our DokanFCB that is allocated by the global fcb lookaside list.
+  LOOKASIDE_LIST_EX FCBAvlNodeLookasideList;
+  // Whether the lookaside list was initialized.
+  BOOLEAN FCBAvlNodeLookasideListInit;
 
   // NotifySync is used by notify directory change
   PNOTIFY_SYNC NotifySync;
@@ -567,6 +586,12 @@ typedef struct _DokanFileControlBlock {
   // owned by the VCB and guarded by the VCB lock.
   BOOLEAN GarbageCollectionGracePeriodPassed;
 
+  // The Fcb was removed from the Avl table and is waiting to be deleted when
+  // all existing handles are being closed. This can happen when a file is
+  // renamed with the destination having an open handle. NTFS denies this action
+  // but due to a Dokan bug, this is actually possible. Until it is fixed, we
+  // reproduce the behavior prior to the Avl table.
+  BOOLEAN ReplacedByRename;
 } DokanFCB, *PDokanFCB;
 
 #define DokanResourceLockRO(resource)                                          \
@@ -735,8 +760,6 @@ BOOLEAN DokanVCBTryLockRW(PDokanVCB vcb);
 typedef struct _DokanContextControlBlock {
   // Locking: Read only field. No locking needed.
   FSD_IDENTIFIER Identifier;
-  // Locking: Main lock for CCBs.
-  ERESOURCE Resource;
   // Locking: Read only field. No locking needed.
   PDokanFCB Fcb;
   // Locking: Modified with the *FCB* lock held.
@@ -811,6 +834,9 @@ typedef struct _REQUEST_CONTEXT {
   // The IRP is forced timeout for being properly canceled.
   // See DokanCreateIrpCancelRoutine.
   BOOLEAN ForcedCanceled;
+
+  // Whether if we are the top-level IRP.
+  BOOLEAN IsTopLevelIrp;
 } REQUEST_CONTEXT, *PREQUEST_CONTEXT;
 
 // IRP list which has pending status
@@ -834,7 +860,6 @@ typedef struct _DEVICE_ENTRY {
 
 typedef struct _DRIVER_EVENT_CONTEXT {
   LIST_ENTRY ListEntry;
-  PKEVENT Completed;
   EVENT_CONTEXT EventContext;
 } DRIVER_EVENT_CONTEXT, *PDRIVER_EVENT_CONTEXT;
 
@@ -891,7 +916,7 @@ DOKAN_DISPATCH DokanBuildRequest;
 // avoids having us getting incorrect value (like IrpSp) after the IRP gets
 // canceled or we lose the ownership.
 NTSTATUS DokanBuildRequestContext(_In_ PDEVICE_OBJECT DeviceObject,
-                                  _In_ PIRP Irp,
+                                  _In_ PIRP Irp, BOOLEAN IsTopLevelIrp,
                                   _Outptr_ PREQUEST_CONTEXT RequestContext);
 
 NTSTATUS
@@ -960,10 +985,6 @@ VOID DokanPrePostIrp(IN PVOID Context, IN PIRP Irp);
 NTSTATUS
 DokanRegisterPendingIrpForEvent(__in PREQUEST_CONTEXT RequestContext);
 
-// Currently not used
-NTSTATUS
-DokanRegisterPendingIrpForService(__in PREQUEST_CONTEXT RequestContext);
-
 NTSTATUS
 DokanCompleteIrp(__in PREQUEST_CONTEXT RequestContext);
 
@@ -981,7 +1002,8 @@ NTSTATUS
 DokanGetMountPointList(__in PREQUEST_CONTEXT RequestContext);
 
 NTSTATUS
-DokanDispatchRequest(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp);
+DokanDispatchRequest(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp,
+                     BOOLEAN IsTopLevelIrp);
 
 NTSTATUS
 DokanEventRelease(__in_opt PREQUEST_CONTEXT RequestContext,
@@ -1159,8 +1181,6 @@ VOID DokanStopCheckThread(__in PDokanDCB Dcb);
 BOOLEAN
 DokanCheckCCB(__in PREQUEST_CONTEXT RequestContext, __in_opt PDokanCCB Ccb);
 
-VOID DokanInitIrpList(__in PIRP_LIST IrpList);
-
 NTSTATUS
 DokanStartEventNotificationThread(__in PDokanDCB Dcb);
 
@@ -1202,6 +1222,9 @@ VOID DokanCreateMountPoint(__in PDokanDCB Dcb);
 
 VOID FlushFcb(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB fcb,
               __in_opt PFILE_OBJECT fileObject);
+
+BOOLEAN
+DokanLookasideCreate(__in LOOKASIDE_LIST_EX *pCache, __in size_t cbElement);
 
 static UNICODE_STRING sddl = RTL_CONSTANT_STRING(
     L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGX;;;RC)");

@@ -25,14 +25,17 @@ namespace {
 
 const auto kParams = testing::Values(
     kCallbackSync,
-    kCallbackAsyncEphemeralThread,
     // Current DriveFS prod config.
-    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
-        kAllowRequestBatching | kFcbGarbageCollection,
+    kCallbackAsyncEphemeralThread | kAllowRequestBatching |
+        kFcbGarbageCollection |
+        kDisabledNetworkPhysicalNameQuery,
     // Likely next DriveFS prod config.
-    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
-        kAssumePagingIoIsLocked | kAllowRequestBatching | kAllowFullBatching |
-        kFcbGarbageCollection | kUseFsctlEvents);
+    kCallbackAsyncEphemeralThread | kAllowRequestBatching |
+        kFcbGarbageCollection |
+        kDisabledNetworkPhysicalNameQuery |
+        // New possible prod config
+        kAllowFullBatching | kAssumePagingIoIsLocked | kDispatchDriverLogs |
+        kPullEventAhead | kStoreFcbAvlTable);
 
 }  // namespace
 

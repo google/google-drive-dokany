@@ -135,18 +135,24 @@ VOID IncrementVcbLogCacheCount();
   DOKAN_LOG_INTERNAL(RequestContext, "[%p]: " Format,   \
                      (RequestContext ? RequestContext->Irp : 0), __VA_ARGS__)
 
+// Logging function that should be used in an VCB context.
+#define DOKAN_LOG_VCB(dVcb, Format, ...)                               \
+  do {                                                                 \
+    REQUEST_CONTEXT vcbRequestContext;                                 \
+    RtlZeroMemory(&vcbRequestContext, sizeof(REQUEST_CONTEXT));        \
+    vcbRequestContext.DoNotLogActivity = FALSE;                        \
+    vcbRequestContext.Vcb = (dVcb);                                    \
+    vcbRequestContext.Dcb = (dVcb)->Dcb;                               \
+    DOKAN_LOG_INTERNAL((&vcbRequestContext), ": " Format, __VA_ARGS__) \
+  } while (0)
+
 // Only allow logging events that are not Wait & Info to avoid unnecessary log
 // flood
 #define DOKAN_DENIED_LOG_EVENT(IrpSp)                                        \
-  (IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL &&                          \
-   (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_EVENT_WAIT ||   \
-    IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_EVENT_INFO)) || \
-      (IrpSp->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL &&                 \
-       IrpSp->MinorFunction == IRP_MN_USER_FS_REQUEST &&                     \
-       (IrpSp->Parameters.FileSystemControl.FsControlCode ==                 \
-            IOCTL_EVENT_WAIT ||                                              \
-        IrpSp->Parameters.FileSystemControl.FsControlCode ==                 \
-            IOCTL_EVENT_INFO))
+  (IrpSp->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL &&                     \
+   IrpSp->MinorFunction == IRP_MN_USER_FS_REQUEST &&                         \
+   (IrpSp->Parameters.FileSystemControl.FsControlCode == FSCTL_EVENT_WAIT || \
+    IrpSp->Parameters.FileSystemControl.FsControlCode == FSCTL_EVENT_INFO))
 
 // Log the Irp FSCTL or IOCTL Control code.
 #define DOKAN_LOG_IOCTL(RequestContext, ControlCode, format, ...)            \

@@ -84,6 +84,18 @@ class FileInfoHandler {
         startup_options_->allocation_unit_size, dest->AllocationSize.QuadPart);
   }
 
+  template <typename T>
+  void FillIdInfo(const FileInfo& source, T* dest) {
+    dest->VolumeSerialNumber = startup_options_->volume_serial_number;
+    std::memcpy(&dest->FileId.Identifier, &source.file_index,
+                sizeof(source.file_index));
+  }
+
+  template <typename T>
+  void FillInternalInfo(const FileInfo& source, T* dest) {
+    dest->IndexNumber.QuadPart = source.file_index;
+  }
+
  private:
   void FillStandardInfo(const FileInfo& source,
                         FILE_STANDARD_INFORMATION* dest);
@@ -91,11 +103,8 @@ class FileInfoHandler {
   void FillNetworkOpenInfo(const FileInfo& source,
                            FILE_NETWORK_OPEN_INFORMATION* dest);
 
-  NTSTATUS FillAllInfo(
-      EVENT_CONTEXT* request,
-      const FileInfo& get_info_result,
-      EVENT_INFORMATION* reply,
-      ULONG* used_buffer_size);
+  NTSTATUS FillAllInfo(EVENT_CONTEXT* request, const FileInfo& get_info_result,
+                       EVENT_INFORMATION* reply, ULONG* used_buffer_size);
 
   // Converts the status and result from FileCallbacks::GetInfo into a status
   // and FILE_*_INFORMATION struct to return to the driver. The latter struct is

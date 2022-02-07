@@ -21,6 +21,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "util/irp_buffer_helper.h"
 #include "util/mountmgr.h"
 #include "util/str.h"
 
@@ -55,10 +56,11 @@ static VOID FreeDcbNames(__in PDokanDCB Dcb) {
   }
 }
 
-VOID DokanInitIrpList(__in PIRP_LIST IrpList) {
+VOID DokanInitIrpList(__in PIRP_LIST IrpList, __in BOOLEAN EventEnabled) {
   InitializeListHead(&IrpList->ListHead);
   KeInitializeSpinLock(&IrpList->ListLock);
   KeInitializeEvent(&IrpList->NotEmpty, NotificationEvent, FALSE);
+  IrpList->EventEnabled = EventEnabled;
 }
 
 PDEVICE_ENTRY
@@ -489,37 +491,40 @@ DokanGetMountPointList(__in PREQUEST_CONTEXT RequestContext) {
   NTSTATUS status = STATUS_INVALID_PARAMETER;
   PLIST_ENTRY listEntry;
   PMOUNT_ENTRY mountEntry;
-  PDOKAN_CONTROL dokanControl;
-  int i = 0;
+  PDOKAN_MOUNT_POINT_INFO dokanMountPointInfo;
+  USHORT i = 0;
 
-  try {
+  __try {
     ExAcquireResourceExclusiveLite(&RequestContext->DokanGlobal->Resource,
                                    TRUE);
-    dokanControl =
-        (PDOKAN_CONTROL)RequestContext->Irp->AssociatedIrp.SystemBuffer;
+    dokanMountPointInfo = (PDOKAN_MOUNT_POINT_INFO)
+                              RequestContext->Irp->AssociatedIrp.SystemBuffer;
     for (listEntry = RequestContext->DokanGlobal->MountPointList.Flink;
          listEntry != &RequestContext->DokanGlobal->MountPointList;
          listEntry = listEntry->Flink, ++i) {
-      if (RequestContext->IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
-          (sizeof(DOKAN_CONTROL) * (i + 1))) {
+      if (!ExtendOutputBufferBySize(RequestContext->Irp,
+                                    sizeof(DOKAN_MOUNT_POINT_INFO),
+                                    /*UpdateInformationOnFailure=*/FALSE)) {
         status = STATUS_BUFFER_OVERFLOW;
         __leave;
       }
 
-      RequestContext->Irp->IoStatus.Information =
-          sizeof(DOKAN_CONTROL) * (i + 1);
       mountEntry = CONTAINING_RECORD(listEntry, MOUNT_ENTRY, ListEntry);
-      RtlCopyMemory(&dokanControl[i], &mountEntry->MountControl,
-                    sizeof(DOKAN_CONTROL));
-      // Remove Kernel information
-      // TODO create specific struct for userland
-      dokanControl[i].Dcb = NULL;
-      dokanControl[i].DiskDeviceObject = NULL;
-      dokanControl[i].VolumeDeviceObject = NULL;
+
+      dokanMountPointInfo[i].Type = mountEntry->MountControl.Type;
+      RtlCopyMemory(&dokanMountPointInfo[i].MountPoint,
+                    &mountEntry->MountControl.MountPoint,
+                    sizeof(mountEntry->MountControl.MountPoint));
+      RtlCopyMemory(&dokanMountPointInfo[i].UNCName,
+                    &mountEntry->MountControl.UNCName,
+                    sizeof(mountEntry->MountControl.UNCName));
+      RtlCopyMemory(&dokanMountPointInfo[i].DeviceName,
+                    &mountEntry->MountControl.DeviceName,
+                    sizeof(mountEntry->MountControl.DeviceName));
     }
 
     status = STATUS_SUCCESS;
-  } finally {
+  } __finally {
     ExReleaseResourceLite(&RequestContext->DokanGlobal->Resource);
   }
 
@@ -622,8 +627,6 @@ DokanCreateGlobalDiskDevice(__in PDRIVER_OBJECT DriverObject,
   dokanGlobal->MountId = 0;
   dokanGlobal->DriverVersion = (GUID) DOKAN_DRIVER_VERSION;
 
-  DokanInitIrpList(&dokanGlobal->PendingService);
-  DokanInitIrpList(&dokanGlobal->NotifyService);
   InitializeListHead(&dokanGlobal->MountPointList);
   InitializeListHead(&dokanGlobal->DeviceDeleteList);
   ExInitializeResourceLite(&dokanGlobal->Resource);
@@ -711,7 +714,6 @@ VOID DokanCreateMountPointSysProc(__in PVOID pDcb) {
 // sufficient and more correct in that case.
 VOID DokanCreateMountPoint(__in PDokanDCB Dcb) {
   DOKAN_INIT_LOGGER(logger, Dcb->DriverObject, IRP_MJ_FILE_SYSTEM_CONTROL);
-  ASSERT(!Dcb->ResolveMountConflicts);
 
   if (Dcb->MountPoint != NULL && Dcb->MountPoint->Length > 0) {
     if (Dcb->UseMountManager) {
@@ -747,21 +749,12 @@ VOID DokanDeleteMountPoint(__in_opt PREQUEST_CONTEXT RequestContext,
     if (Dcb->UseMountManager) {
       Dcb->UseMountManager = FALSE;  // To avoid recursive call
       if (IsMountPointDriveLetter(Dcb->MountPoint)) {
-        if (Dcb->ResolveMountConflicts) {
           DokanLogInfo(&logger,
                        L"Issuing a clean mount manager delete for device \"%wZ\"",
                        Dcb->DiskDeviceName);
           // This is the correct way to do it. It makes the mount manager forget
           // the volume rather than leaving a do-not-assign record.
           DokanSendVolumeDeletePoints(NULL, Dcb->DiskDeviceName);
-        } else {
-          DokanLogInfo(
-              &logger,
-              L"Issuing a mount manager do-not-assign delete for device \"%wZ\"",
-              Dcb->DiskDeviceName);
-          // Deprecated logic to keep the original semantics intact when used.
-          DokanSendVolumeDeletePoints(Dcb->MountPoint, Dcb->DiskDeviceName);
-        }
       } else if (Dcb->PersistentSymbolicLinkName) {
         // Remove the actual reparse point on our directory mount point.
         ULONG removeReparseInputlength = 0;
@@ -958,10 +951,10 @@ DokanCreateDiskDevice(__in PDRIVER_OBJECT DriverObject, __in ULONG MountId,
     diskDeviceObject->Flags |= DO_DIRECT_IO;
 
     // initialize Event and Event queue
-    DokanInitIrpList(&dcb->PendingIrp);
-    DokanInitIrpList(&dcb->PendingEvent);
-    DokanInitIrpList(&dcb->NotifyEvent);
-    DokanInitIrpList(&dcb->PendingRetryIrp);
+    DokanInitIrpList(&dcb->PendingIrp, /*EventEnabled=*/FALSE);
+    DokanInitIrpList(&dcb->PendingEvent, /*EventEnabled=*/TRUE);
+    DokanInitIrpList(&dcb->NotifyEvent, /*EventEnabled=*/TRUE);
+    DokanInitIrpList(&dcb->PendingRetryIrp, /*EventEnabled=*/TRUE);
 
     KeInitializeEvent(&dcb->ReleaseEvent, NotificationEvent, FALSE);
     ExInitializeResourceLite(&dcb->Resource);

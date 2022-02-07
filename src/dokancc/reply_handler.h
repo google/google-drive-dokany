@@ -68,7 +68,7 @@ struct Reply {
 class ReplyHandler : public ReplyMonitor {
  public:
   ReplyHandler(Device* device, Logger* logger, size_t thread_count,
-               bool allow_batching, bool use_fsctl_events);
+               bool allow_batching);
 
   ~ReplyHandler() {
     Shutdown();
@@ -110,7 +110,6 @@ class ReplyHandler : public ReplyMonitor {
   Device* const device_;
   Logger* const logger_;
   const bool allow_batching_;
-  const bool use_fsctl_events_;
   std::vector<std::unique_ptr<std::thread>> threads_;
 
   std::condition_variable state_changed_;

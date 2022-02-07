@@ -157,7 +157,6 @@ DokanQueryDirectory(__in PREQUEST_CONTEXT RequestContext) {
   }
 
   eventContext->Context = ccb->UserContext;
-  // DDbgPrint("   get Context %X\n", (ULONG)ccb->UserContext);
 
   // index which specified index-1 th directory entry has been returned
   // this time, 'index'th entry should be returned
@@ -262,17 +261,13 @@ VOID DokanCompleteDirectoryControl(__in PREQUEST_CONTEXT RequestContext,
 
   // buffer pointer which points DirecotryInfo
   if (RequestContext->Irp->MdlAddress) {
-    // DDbgPrint("   use MDL Address\n");
     buffer =
         MmGetSystemAddressForMdlNormalSafe(RequestContext->Irp->MdlAddress);
   } else {
-    // DDbgPrint("   use UserBuffer\n");
     buffer = RequestContext->Irp->UserBuffer;
   }
   // usable buffer size
   bufferLen = RequestContext->IrpSp->Parameters.QueryDirectory.Length;
-
-  // DDbgPrint("  !!Returning DirectoryInfo!!\n");
 
   // buffer is not specified or short of length
   if (bufferLen == 0 || buffer == NULL || bufferLen < EventInfo->BufferLength) {
@@ -289,7 +284,6 @@ VOID DokanCompleteDirectoryControl(__in PREQUEST_CONTEXT RequestContext,
     ASSERT(buffer != NULL);
     RtlZeroMemory(buffer, bufferLen);
 
-    // DDbgPrint("   copy DirectoryInfo\n");
     RtlCopyMemory(buffer, EventInfo->Buffer, EventInfo->BufferLength);
 
     DOKAN_LOG_FINE_IRP(RequestContext, "EventInfo->Directory.Index = %lu",
@@ -304,7 +298,6 @@ VOID DokanCompleteDirectoryControl(__in PREQUEST_CONTEXT RequestContext,
     ccb->Context = EventInfo->Operation.Directory.Index;
 
     ccb->UserContext = EventInfo->Context;
-    // DDbgPrint("   set Context %X\n", (ULONG)ccb->UserContext);
 
     // written bytes
     // irpSp->Parameters.QueryDirectory.Length = EventInfo->BufferLength;

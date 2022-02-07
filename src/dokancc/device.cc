@@ -44,8 +44,8 @@ bool Device::OpenGlobalDevice() {
   return opened;
 }
 
-bool Device::Open(const std::wstring& name) {
-  handle_ = CreateFile(name.c_str(), desired_access_,
+bool Device::Open(const std::wstring& name, DWORD desired_access) {
+  handle_ = CreateFile(name.c_str(), desired_access,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                        FILE_FLAG_OVERLAPPED, NULL);
   name_ = name;
@@ -120,10 +120,6 @@ void Device::LogGenericResult(ULONG ioctl) {
     DOKAN_LOG_(ERROR) << "IOCTL " << Hex(ioctl) << " failed on device " << name_
                       << "; error: " << GetLastError();
   }
-}
-
-void Device::SetDesiredAccess(DWORD desired_access) {
-  desired_access_ = desired_access;
 }
 
 }  // namespace dokan

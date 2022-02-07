@@ -32,58 +32,33 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 // a fixed-size buffer.
 #define VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE (1024 * 16)
 
-#define IOCTL_GET_VERSION                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_VERSION \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_SET_DEBUG_MODE                                                   \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_SET_DEBUG_MODE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_WAIT                                                       \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_WAIT \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_INFO                                                       \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_INFO \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_RELEASE                                                    \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_RELEASE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_START                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_START \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_WRITE                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_WRITE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
-#define IOCTL_SERVICE_WAIT                                                     \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define FSCTL_SERVICE_WAIT \
-  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-#define IOCTL_RESET_TIMEOUT                                                    \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_RESET_TIMEOUT \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_GET_ACCESS_TOKEN                                                 \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_ACCESS_TOKEN \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_MOUNTPOINT_LIST                                            \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_MOUNTPOINT_LIST \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
@@ -103,8 +78,6 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 // DeviceIoControl code to retrieve the VOLUME_METRICS struct for the targeted
 // volume.
-#define IOCTL_GET_VOLUME_METRICS                                               \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_VOLUME_METRICS \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
@@ -426,16 +399,17 @@ typedef struct _EVENT_INFORMATION {
 #define DOKAN_EVENT_CURRENT_SESSION                                 (1 << 4)
 #define DOKAN_EVENT_FILELOCK_USER_MODE                              (1 << 5)
 #define DOKAN_EVENT_LOCK_DEBUG_ENABLED                              (1 << 6)
-#define DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS                         (1 << 7)
 // No longer used option (1 << 8)
 // No longer used option (1 << 9)
 #define DOKAN_EVENT_DRIVE_LETTER_IN_USE                             (1 << 10)
 #define DOKAN_EVENT_LOG_OPLOCKS                                     (1 << 11)
 #define DOKAN_EVENT_DISPATCH_NON_ROOT_OPENS_BEFORE_EVENT_WAIT       (1 << 12)
-#define DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT             (1 << 13)
 #define DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED                      (1 << 14)
 #define DOKAN_EVENT_ALLOW_IPC_BATCHING                              (1 << 15)
 #define DOKAN_EVENT_DISPATCH_DRIVER_LOGS                            (1 << 16)
+#define DOKAN_EVENT_DISABLE_NETWORK_PHYSICAL_QUERY                  (1 << 17)
+#define DOKAN_EVENT_PULL_EVENT_AHEAD (1 << 18)
+#define DOKAN_EVENT_FCB_AVL_TABLE (1 << 19)
 
 // Non-exclusive bits that can be set in EVENT_DRIVER_INFO.Flags for the driver
 // to send back extra info about what happened during a mount attempt, whether
@@ -463,6 +437,9 @@ typedef struct _EVENT_INFORMATION {
 // manager has actually assigned a drive letter. We are not sure if this ever
 // happens; if so, it should be very rare.
 #define DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED 16
+
+// Dokan failed to set the reparse point for the mount point folder provided.
+#define DOKAN_DRIVER_INFO_SET_REPARSE_POINT_FAILED 32
 
 typedef struct _EVENT_DRIVER_INFO {
   GUID DriverVersion;
@@ -498,6 +475,20 @@ typedef struct _DOKAN_LINK_INFORMATION {
   ULONG FileNameLength;
   WCHAR FileName[1];
 } DOKAN_LINK_INFORMATION, *PDOKAN_LINK_INFORMATION;
+
+#define MAX_PATH 260
+
+// Used for returning a list of mount points for FSCTL_EVENT_MOUNTPOINT_LIST
+typedef struct _DOKAN_MOUNT_POINT_INFO {
+  // File System Type
+  ULONG Type;
+  // Mount point. Can be "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS)
+  WCHAR MountPoint[MAX_PATH];
+  // UNC name used for network volume
+  WCHAR UNCName[64];
+  // Disk Device Name
+  WCHAR DeviceName[64];
+} DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
 
 // Dokan Major IRP values dispatched to userland for custom request with
 // EVENT_CONTEXT.

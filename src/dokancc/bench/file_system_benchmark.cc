@@ -20,6 +20,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
 
 #include "file_system_test_base.h"
 
@@ -54,21 +57,61 @@ static const std::wstring kBenchWriteIOFilePath =
 class BenchmarkTest : public ::testing::TestWithParam<int> {
  public:
   void SetUp() override {
-    uint64_t param = kCallbackSync | kSuppressFileNameInEventContext |
-                     kAllowRequestBatching | kFcbGarbageCollection;
-    fs_helper_ = std::make_unique<FileSystemTestHelper>(
-        kMountPoint, param, std::make_unique<NullLogger>());
+    DWORD test_path_size = MAX_PATH;
+    std::wstring test_path;
+    test_path.resize(test_path_size);
+    test_path_size = GetEnvironmentVariable(L"DOKANCC_BENCH_PATH",
+                                            test_path.data(), test_path.size());
+    DWORD error = GetLastError();
+    if (test_path_size == 0 && error != ERROR_ENVVAR_NOT_FOUND) {
+      std::cerr << "GetEnvironmentVariable failed to get DOKANCC_BENCH_PATH: "
+                << error << std::endl;
+      assert(false);
+    }
+    test_path.resize(test_path_size);
+
+    if (test_path.empty()) {
+      uint64_t param = kCallbackSync | kAllowRequestBatching |
+                       kFcbGarbageCollection |
+                       kPullEventAhead | kStoreFcbAvlTable;
+      fs_helper_ = std::make_unique<FileSystemTestHelper>(
+          kMountPoint, param, std::make_unique<NullLogger>());
+    } else {
+      std::wstring random_folder_name;
+      random_folder_name.resize(10);
+      std::random_device rd;
+      std::uniform_int_distribution<int> dist('a', 'z');
+      std::generate(random_folder_name.begin(), random_folder_name.end(),
+                    [&] { return dist(rd); });
+      std::wstring random_folder_path = test_path + L"\\" + random_folder_name;
+      EXPECT_TRUE(std::filesystem::create_directories(random_folder_path));
+      bench_dir_path_ = random_folder_path + kBenchInternalDirPath;
+      bench_file_path_ = bench_dir_path_ + L"\\file_";
+      bench_read_io_file_path_ =
+          random_folder_path + kBenchInternalReadIOFilePath;
+      bench_write_io_file_path_ =
+          random_folder_path + kBenchInternalWriteIOFilePath;
+    }
   }
 
  protected:
-  void RunFS(const std::function<void()>& test_logic) {
+  void MaybeRunFS(const std::function<void()>& bench_logic) {
+    if (!fs_helper_) {
+      RunBench(bench_logic);
+      return;
+    }
+
     StartupOptions options;
     fs_helper_->RunFS(options, [&](FileSystem* fs) {
-      StartTimer();
-      test_logic();
-      StopTimer();
+      RunBench(bench_logic);
       fs->Unmount();
     });
+  }
+
+  void RunBench(const std::function<void()>& bench_logic) {
+    StartTimer();
+    bench_logic();
+    StopTimer();
   }
 
   void StartTimer() {
@@ -92,6 +135,10 @@ class BenchmarkTest : public ::testing::TestWithParam<int> {
 
  protected:
   std::unique_ptr<FileSystemTestHelper> fs_helper_;
+  std::wstring bench_dir_path_ = kBenchDirePath;
+  std::wstring bench_file_path_ = kBenchFilePath;
+  std::wstring bench_read_io_file_path_ = kBenchReadIOFilePath;
+  std::wstring bench_write_io_file_path_ = kBenchWriteIOFilePath;
 
  private:
   std::chrono::steady_clock::time_point begin_time_;
@@ -105,19 +152,53 @@ class BenchmarkCreate : public BenchmarkTest {
   void SetUp() override {
     BenchmarkTest::SetUp();
     const uint64_t file_count = GetParam();
-    // Allows file create during the test.
-    fs_helper_->callbacks_->SetAllowCreateFiles(true);
-    // Setup files for test using existing files.
-    std::vector<FileNameAndInfo> entries(file_count);
-    for (uint64_t i = 0; i < file_count; ++i) {
-      entries[i].name = L"file_" + std::to_wstring(i);
-      entries[i].info.file_attributes = FILE_ATTRIBUTE_NORMAL;
+    if (fs_helper_) {
+      // Allows file create during the test.
+      fs_helper_->callbacks_->SetAllowCreateFiles(true);
     }
-    fs_helper_->callbacks_->SetUpDir(kBenchInternalDirPath, entries);
-    // Setup empty directories for RemoveDirectory
-    for (uint64_t i = 0; i < file_count; ++i) {
-      fs_helper_->callbacks_->SetUpDir(
-          kBenchInternalDirPath + std::to_wstring(i), {});
+  }
+
+  void CreateBenchDir() {
+    if (fs_helper_) {
+      fs_helper_->callbacks_->SetUpDir(kBenchInternalDirPath);
+    } else {
+      std::filesystem::path bench_dir_folder(bench_dir_path_);
+      EXPECT_TRUE(std::filesystem::create_directories(bench_dir_folder));
+    }
+  }
+
+  void CreateBenchFileTree() {
+    CreateBenchDir();
+    const uint64_t file_count = GetParam();
+    if (fs_helper_) {
+      std::vector<FileNameAndInfo> entries(file_count);
+      for (uint64_t i = 0; i < file_count; ++i) {
+        entries[i].name = L"file_" + std::to_wstring(i);
+        entries[i].info.file_attributes = FILE_ATTRIBUTE_NORMAL;
+      }
+      fs_helper_->callbacks_->SetUpDir(kBenchInternalDirPath, entries);
+    } else {
+      for (uint64_t i = 0; i < file_count; ++i) {
+        std::filesystem::path test_file_path(bench_file_path_);
+        test_file_path += std::to_wstring(i);
+        std::ofstream test_file(test_file_path);
+      }
+    }
+  }
+
+  void CreateBenchFolderTree() {
+    const uint64_t file_count = GetParam();
+    if (fs_helper_) {
+      for (uint64_t i = 0; i < file_count; ++i) {
+        fs_helper_->callbacks_->SetUpDir(
+            kBenchInternalDirPath + std::to_wstring(i), {});
+      }
+    } else {
+      for (uint64_t i = 0; i < file_count; ++i) {
+        std::filesystem::path empty_path_folder(bench_dir_path_);
+        empty_path_folder += std::to_wstring(i);
+        EXPECT_TRUE(std::filesystem::create_directories(empty_path_folder));
+      }
     }
   }
 };
@@ -125,9 +206,10 @@ class BenchmarkCreate : public BenchmarkTest {
 // Create new files and close right after.
 TEST_P(BenchmarkCreate, NewFile) {
   HANDLE handle;
-  const auto base_file_name = kBenchFilePath + L"_new_";
+  const auto base_file_name = bench_dir_path_ + L"\\File_new_";
 
-  RunFS([&] {
+  CreateBenchDir();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
       const auto file_name = base_file_name + std::to_wstring(i);
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
@@ -141,8 +223,10 @@ TEST_P(BenchmarkCreate, NewFile) {
 
 // Create new directories.
 TEST_P(BenchmarkCreate, NewDir) {
-  const auto base_dir_name = kBenchDirePath + L"_new_";
-  RunFS([&] {
+  const auto base_dir_name = bench_dir_path_ + L"\\File_new_";
+
+  CreateBenchDir();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
       const auto dir_name = base_dir_name + std::to_wstring(i);
       EXPECT_TRUE(CreateDirectory(dir_name.c_str(), nullptr));
@@ -154,9 +238,10 @@ TEST_P(BenchmarkCreate, NewDir) {
 TEST_P(BenchmarkCreate, Open) {
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -169,9 +254,17 @@ TEST_P(BenchmarkCreate, Open) {
 // Open repeatedly the same existing file.
 TEST_P(BenchmarkCreate, RepeatedOpen) {
   HANDLE handle;
-  const auto file_name = kBenchFilePath + L"0";
+  const auto file_name = bench_file_path_ + L"0";
 
-  RunFS([&] {
+  CreateBenchDir();
+  MaybeRunFS([&] {
+    handle = CreateFile(file_name.c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle);
+    EXPECT_TRUE(CloseHandle(handle));
+    StartTimer();
+
     for (uint64_t i = 0; i < GetParam(); ++i) {
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -186,9 +279,10 @@ TEST_P(BenchmarkCreate, RepeatedOpen) {
 TEST_P(BenchmarkCreate, Overwrite) {
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
@@ -203,9 +297,10 @@ TEST_P(BenchmarkCreate, KeepAllOpenAndCloseRandomly) {
   std::vector<HANDLE> handles;
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -229,9 +324,10 @@ TEST_P(BenchmarkCreate, KeepAllOpenAndReOpenActiveFcb) {
   std::vector<HANDLE> handles;
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       handle = CreateFile(file_name.c_str(), GENERIC_READ,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -240,7 +336,7 @@ TEST_P(BenchmarkCreate, KeepAllOpenAndReOpenActiveFcb) {
     }
 
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       HANDLE second_handle = CreateFile(
           file_name.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -264,9 +360,10 @@ TEST_P(BenchmarkList, AllFiles) {
   WIN32_FIND_DATAW find_data;
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t x = 0; x < GetParam(); ++x) {
-      handle = FindFirstFile((kBenchDirePath + L"\\*").c_str(), &find_data);
+      handle = FindFirstFile((bench_dir_path_ + L"\\*").c_str(), &find_data);
       EXPECT_NE(INVALID_HANDLE_VALUE, handle);
       while (FindNextFile(handle, &find_data))
         ;
@@ -280,9 +377,10 @@ TEST_P(BenchmarkList, ExactFile) {
   WIN32_FIND_DATAW find_data;
   HANDLE handle;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       handle = FindFirstFile(file_name.c_str(), &find_data);
       EXPECT_NE(INVALID_HANDLE_VALUE, handle);
       while (FindNextFile(handle, &find_data))
@@ -302,10 +400,11 @@ TEST_P(BenchmarkFileAttribute, GetAttributes) {
   const auto param = GetParam();
   DWORD file_attributes;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t x = 0; x < kListFilesCount; ++x) {
       for (uint64_t i = 0; i < GetParam(); ++i) {
-        const auto file_name = kBenchFilePath + std::to_wstring(i);
+        const auto file_name = bench_file_path_ + std::to_wstring(i);
         file_attributes = GetFileAttributes(file_name.c_str());
         EXPECT_NE(INVALID_FILE_ATTRIBUTES, file_attributes);
       }
@@ -324,10 +423,11 @@ TEST_P(BenchmarkFileAttribute, GetAttributesRand) {
   std::shuffle(file_numbers.begin(), file_numbers.end(),
                std::mt19937{std::random_device{}()});
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t x = 0; x < kListFilesCount; ++x) {
       for (auto&& file_number : file_numbers) {
-        const auto file_name = kBenchFilePath + std::to_wstring(file_number);
+        const auto file_name = bench_file_path_ + std::to_wstring(file_number);
         file_attributes = GetFileAttributes(file_name.c_str());
         EXPECT_NE(INVALID_FILE_ATTRIBUTES, file_attributes);
       }
@@ -340,10 +440,11 @@ TEST_P(BenchmarkFileAttribute, SetAttributes) {
   const auto param = GetParam();
   DWORD file_attributes;
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t x = 0; x < kListFilesCount; ++x) {
       for (uint64_t i = 0; i < GetParam(); ++i) {
-        const auto file_name = kBenchFilePath + std::to_wstring(i);
+        const auto file_name = bench_file_path_ + std::to_wstring(i);
         EXPECT_NE(SetFileAttributes(file_name.c_str(), FILE_ATTRIBUTE_HIDDEN),
                   0);
       }
@@ -362,10 +463,11 @@ TEST_P(BenchmarkFileAttribute, SetAttributesRand) {
   std::shuffle(file_numbers.begin(), file_numbers.end(),
                std::mt19937{std::random_device{}()});
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t x = 0; x < kListFilesCount; ++x) {
       for (auto&& file_number : file_numbers) {
-        const auto file_name = kBenchFilePath + std::to_wstring(file_number);
+        const auto file_name = bench_file_path_ + std::to_wstring(file_number);
         EXPECT_NE(SetFileAttributes(file_name.c_str(), FILE_ATTRIBUTE_HIDDEN),
                   0);
       }
@@ -380,9 +482,10 @@ using BenchmarkDelete = BenchmarkCreate;
 
 // Delete existing file.
 TEST_P(BenchmarkDelete, File) {
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto file_name = kBenchFilePath + std::to_wstring(i);
+      const auto file_name = bench_file_path_ + std::to_wstring(i);
       EXPECT_TRUE(DeleteFile(file_name.c_str()));
     }
   });
@@ -395,9 +498,10 @@ TEST_P(BenchmarkDelete, FileRand) {
   std::shuffle(file_numbers.begin(), file_numbers.end(),
                std::mt19937{std::random_device{}()});
 
-  RunFS([&] {
+  CreateBenchFileTree();
+  MaybeRunFS([&] {
     for (auto&& file_number : file_numbers) {
-      const auto file_name = kBenchFilePath + std::to_wstring(file_number);
+      const auto file_name = bench_file_path_ + std::to_wstring(file_number);
       EXPECT_TRUE(DeleteFile(file_name.c_str()));
     }
   });
@@ -407,9 +511,10 @@ TEST_P(BenchmarkDelete, FileRand) {
 TEST_P(BenchmarkDelete, Directory) {
   const auto param = GetParam();
 
-  RunFS([&] {
+  CreateBenchFolderTree();
+  MaybeRunFS([&] {
     for (uint64_t i = 0; i < GetParam(); ++i) {
-      const auto dir_name = kBenchDirePath + std::to_wstring(i);
+      const auto dir_name = bench_dir_path_ + std::to_wstring(i);
       EXPECT_TRUE(RemoveDirectory(dir_name.c_str()));
     }
   });
@@ -425,20 +530,40 @@ class BenchmarkIO : public BenchmarkTest {
  public:
   void SetUp() override {
     BenchmarkTest::SetUp();
-    // Setup read / write files
-    fs_helper_->callbacks_->SetUpFile(kBenchInternalReadIOFilePath,
-                                      std::vector<char>(kFileSize));
-    fs_helper_->callbacks_->SetUpFile(kBenchInternalWriteIOFilePath,
-                                      std::vector<char>());
-
     GetSystemInfo(&system_info_);
-    sector_size_ = fs_helper_->fs_->startup_options().allocation_unit_size;
+    // Setup read / write files
+    if (fs_helper_) {
+      fs_helper_->callbacks_->SetUpFile(kBenchInternalReadIOFilePath,
+                                        std::vector<char>(kFileSize));
+      fs_helper_->callbacks_->SetUpFile(kBenchInternalWriteIOFilePath,
+                                        std::vector<char>());
+
+      sector_size_ = fs_helper_->fs_->startup_options().allocation_unit_size;
+    } else {
+      WCHAR volume_path_name[MAX_PATH];
+      EXPECT_TRUE(GetVolumePathNameW(bench_read_io_file_path_.c_str(),
+                                     volume_path_name, MAX_PATH));
+      DWORD sector_per_cluster;
+      DWORD bytes_per_sector;
+      DWORD number_of_free_clusters;
+      DWORD total_number_of_clusters;
+      EXPECT_TRUE(GetDiskFreeSpaceW(volume_path_name, &sector_per_cluster,
+                                    &bytes_per_sector, &number_of_free_clusters,
+                                    &total_number_of_clusters));
+      sector_size_ = bytes_per_sector;
+
+      std::vector<char> data(kFileSize);
+      std::ofstream read_io_file(bench_read_io_file_path_);
+      read_io_file.write(data.data(), data.size());
+      read_io_file.close();
+      std::ofstream write_io_file(bench_write_io_file_path_);
+    }
   }
 
   // Read or write entirely a file repeatedly using a specific |buffer_size|.
   void DoIoTest(const std::wstring& file_name, ULONG flags_and_attributes,
                 DWORD buffer_size, bool read) {
-    RunFS([&] {
+    MaybeRunFS([&] {
       HANDLE handle = CreateFile(
           file_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | flags_and_attributes, 0);
@@ -474,7 +599,7 @@ class BenchmarkIO : public BenchmarkTest {
   // Read or write entirely a memory mapped file repeatedly using a specific
   // |buffer_size|.
   void DoMmapTest(const std::wstring& file_name, DWORD buffer_size, bool read) {
-    RunFS([&] {
+    MaybeRunFS([&] {
       HANDLE handle =
           CreateFile(file_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -525,19 +650,21 @@ class BenchmarkIO : public BenchmarkTest {
 using BenchmarkIOSector = BenchmarkIO;
 
 TEST_P(BenchmarkIOSector, ReadCc) {
-  DoIoTest(kBenchReadIOFilePath, 0, sector_size_, true);
+  DoIoTest(bench_read_io_file_path_, 0, sector_size_, true);
 }
 
 TEST_P(BenchmarkIOSector, WriteCc) {
-  DoIoTest(kBenchWriteIOFilePath, 0, sector_size_, false);
+  DoIoTest(bench_write_io_file_path_, 0, sector_size_, false);
 }
 
 TEST_P(BenchmarkIOSector, ReadNoCc) {
-  DoIoTest(kBenchReadIOFilePath, FILE_FLAG_NO_BUFFERING, sector_size_, true);
+  DoIoTest(bench_read_io_file_path_, FILE_FLAG_NO_BUFFERING, sector_size_,
+           true);
 }
 
 TEST_P(BenchmarkIOSector, WriteNoCc) {
-  DoIoTest(kBenchWriteIOFilePath, FILE_FLAG_NO_BUFFERING, sector_size_, false);
+  DoIoTest(bench_write_io_file_path_, FILE_FLAG_NO_BUFFERING, sector_size_,
+           false);
 }
 
 INSTANTIATE_TEST_CASE_P(BenchmarkIOSectors, BenchmarkIOSector,
@@ -547,20 +674,20 @@ INSTANTIATE_TEST_CASE_P(BenchmarkIOSectors, BenchmarkIOSector,
 using BenchmarkIOPage = BenchmarkIO;
 
 TEST_P(BenchmarkIOPage, ReadCc) {
-  DoIoTest(kBenchReadIOFilePath, 0, system_info_.dwPageSize, true);
+  DoIoTest(bench_read_io_file_path_, 0, system_info_.dwPageSize, true);
 }
 
 TEST_P(BenchmarkIOPage, WriteCc) {
-  DoIoTest(kBenchWriteIOFilePath, 0, system_info_.dwPageSize, false);
+  DoIoTest(bench_write_io_file_path_, 0, system_info_.dwPageSize, false);
 }
 
 TEST_P(BenchmarkIOPage, ReadNoCc) {
-  DoIoTest(kBenchReadIOFilePath, FILE_FLAG_NO_BUFFERING,
+  DoIoTest(bench_read_io_file_path_, FILE_FLAG_NO_BUFFERING,
            system_info_.dwPageSize, true);
 }
 
 TEST_P(BenchmarkIOPage, WriteNoCc) {
-  DoIoTest(kBenchWriteIOFilePath, FILE_FLAG_NO_BUFFERING,
+  DoIoTest(bench_write_io_file_path_, FILE_FLAG_NO_BUFFERING,
            system_info_.dwPageSize, false);
 }
 
@@ -568,20 +695,20 @@ TEST_P(BenchmarkIOPage, WriteNoCc) {
 // Note: Write size will reach the EVENT_CONTEXT_MAX_SIZE and will create a
 // larger write buffer request.
 TEST_P(BenchmarkIOPage, ReadMultiCc) {
-  DoIoTest(kBenchReadIOFilePath, 0, system_info_.dwPageSize * 16, true);
+  DoIoTest(bench_read_io_file_path_, 0, system_info_.dwPageSize * 16, true);
 }
 
 TEST_P(BenchmarkIOPage, WriteMultiCc) {
-  DoIoTest(kBenchWriteIOFilePath, 0, system_info_.dwPageSize * 16, false);
+  DoIoTest(bench_write_io_file_path_, 0, system_info_.dwPageSize * 16, false);
 }
 
 TEST_P(BenchmarkIOPage, ReadMultiNoCc) {
-  DoIoTest(kBenchReadIOFilePath, FILE_FLAG_NO_BUFFERING,
+  DoIoTest(bench_read_io_file_path_, FILE_FLAG_NO_BUFFERING,
            system_info_.dwPageSize * 16, true);
 }
 
 TEST_P(BenchmarkIOPage, WriteMultiNoCc) {
-  DoIoTest(kBenchWriteIOFilePath, FILE_FLAG_NO_BUFFERING,
+  DoIoTest(bench_write_io_file_path_, FILE_FLAG_NO_BUFFERING,
            system_info_.dwPageSize * 16, false);
 }
 
@@ -592,11 +719,11 @@ INSTANTIATE_TEST_CASE_P(BenchmarkIOPages, BenchmarkIOPage,
 using BenchmarkIOMmap = BenchmarkIO;
 
 TEST_P(BenchmarkIOMmap, Read) {
-  DoMmapTest(kBenchReadIOFilePath, system_info_.dwPageSize, true);
+  DoMmapTest(bench_read_io_file_path_, system_info_.dwPageSize, true);
 }
 
 TEST_P(BenchmarkIOMmap, Write) {
-  DoMmapTest(kBenchReadIOFilePath, system_info_.dwPageSize, false);
+  DoMmapTest(bench_read_io_file_path_, system_info_.dwPageSize, false);
 }
 
 INSTANTIATE_TEST_CASE_P(BenchmarkIOMmaps, BenchmarkIOMmap,

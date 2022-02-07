@@ -57,13 +57,14 @@ namespace test {
 // driver code. All replies are asynchronously received by the driver code.
 const uint64_t kCallbackSync = 1;
 const uint64_t kCallbackAsyncEphemeralThread = 2;
-const uint64_t kSuppressFileNameInEventContext = 4;
 const uint64_t kAssumePagingIoIsLocked = 8;
 const uint64_t kAllowRequestBatching = 16;
 const uint64_t kAllowFullBatching = 32;
 const uint64_t kFcbGarbageCollection = 64;
 const uint64_t kDispatchDriverLogs = 128;
-const uint64_t kUseFsctlEvents = 256;
+const uint64_t kDisabledNetworkPhysicalNameQuery = 512;
+const uint64_t kPullEventAhead = 1024;
+const uint64_t kStoreFcbAvlTable = 2048;
 
 class FileSystemTestHelper : public VolumeCallbacks {
  public:
@@ -182,9 +183,6 @@ class FileSystemTestHelper : public VolumeCallbacks {
 
   void RunFS(StartupOptions options,
              const std::function<void (FileSystem*)>& test_logic) {
-    if (param_ & kSuppressFileNameInEventContext) {
-      options.flags |= DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT;
-    }
     if (param_ & kAssumePagingIoIsLocked) {
       options.flags |= DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED;
     }
@@ -200,8 +198,14 @@ class FileSystemTestHelper : public VolumeCallbacks {
     if (param_ & kDispatchDriverLogs) {
         options.flags |= DOKAN_OPTION_DISPATCH_DRIVER_LOGS;
     }
-    if (param_ & kUseFsctlEvents) {
-      options.flags |= DOKAN_OPTION_USE_FSCTL_EVENTS;
+    if (param_ & kDisabledNetworkPhysicalNameQuery) {
+      options.flags |= DOKAN_OPTION_DISABLE_NETWORK_PHYSICAL_QUERY;
+    }
+    if (param_ & kPullEventAhead) {
+      options.flags |= DOKAN_OPTION_PULL_EVENT_AHEAD;
+    }
+    if (param_ & kStoreFcbAvlTable) {
+      options.flags |= DOKAN_OPTION_FCB_AVL_TABLE;
     }
     MountResult result = fs_->Mount(mount_point_, options);
     ASSERT_EQ(MountResult::SUCCESS, result);
@@ -298,9 +302,10 @@ class FileSystemTestHelper : public VolumeCallbacks {
     return handle;
   }
 
-  std::unique_ptr<Device> OpenDevice(const FileSystem* fs) {
+  std::unique_ptr<Device> OpenDevice(const FileSystem* fs,
+                                     DWORD desired_access = 0) {
     auto device = std::make_unique<Device>(logger_.get());
-    if (!device->Open(L"\\\\." + fs->device_name())) {
+    if (!device->Open(L"\\\\." + fs->device_name(), desired_access)) {
       return nullptr;
     }
     return device;

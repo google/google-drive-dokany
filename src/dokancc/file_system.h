@@ -59,7 +59,8 @@ enum MountResult {
   FAILED_TO_OPEN_MOUNTED_DEVICE = 4,
   DRIVER_VERSION_MISMATCH = 5,
   GENERIC_FAILURE = 6,
-  UNRECOGNIZED_DRIVER_MOUNT_RESPONSE = 7
+  UNRECOGNIZED_DRIVER_MOUNT_RESPONSE = 7,
+  NO_MOUNT_POINT_ASSIGNED = 8
 };
 
 // A FileSystem is the user-mode representation of a running file system. It
@@ -315,7 +316,6 @@ class FileSystem {
   ULONG driver_mount_id_ = 0;
   DWORD io_thread_id_ = 0;
   bool allow_request_batching_ = false;
-  bool use_fsctl_events_ = false;
   std::atomic<bool> mounted_{false};
   std::unique_ptr<ChangeHandler> change_handler_;
   std::unique_ptr<FileInfoHandler> file_info_handler_;

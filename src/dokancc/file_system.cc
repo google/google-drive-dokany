@@ -56,8 +56,8 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
     // mount manager database for the time this feature is experimental.
     mount_request->BaseVolumeGuid = DOKAN_DIRECTORY_MOUNTING_BASE_GUID;
   }
-  mount_request->Flags = DOKAN_EVENT_MOUNT_MANAGER |
-                         DOKAN_EVENT_RESOLVE_MOUNT_CONFLICTS;
+  mount_request->Flags = DOKAN_EVENT_MOUNT_MANAGER;
+
   if (options.flags & DOKAN_OPTION_ALT_STREAM) {
     mount_request->Flags |= DOKAN_EVENT_ALTERNATIVE_STREAM_ON;
   }
@@ -76,9 +76,6 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
   if (options.flags & DOKAN_OPTION_LOG_OPLOCKS) {
     mount_request->Flags |= DOKAN_EVENT_LOG_OPLOCKS;
   }
-  if (options.flags & DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT) {
-    mount_request->Flags |= DOKAN_EVENT_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT;
-  }
   if (options.flags & DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED) {
     mount_request->Flags |= DOKAN_EVENT_ASSUME_PAGING_IO_IS_LOCKED;
   }
@@ -86,12 +83,18 @@ bool PrepareMountRequest(const std::wstring& requested_mount_point,
      || options.flags & DOKAN_OPTION_ALLOW_FULL_BATCHING) {
     mount_request->Flags |= DOKAN_EVENT_ALLOW_IPC_BATCHING;
   }
-#ifdef NEXT_DOKANCC_RELEASE
   if (options.flags & DOKAN_OPTION_DISPATCH_DRIVER_LOGS) {
     mount_request->Flags |= DOKAN_EVENT_DISPATCH_DRIVER_LOGS;
   }
-#endif
-
+  if (options.flags & DOKAN_OPTION_DISABLE_NETWORK_PHYSICAL_QUERY) {
+    mount_request->Flags |= DOKAN_EVENT_DISABLE_NETWORK_PHYSICAL_QUERY;
+  }
+  if (options.flags & DOKAN_OPTION_PULL_EVENT_AHEAD) {
+    mount_request->Flags |= DOKAN_EVENT_PULL_EVENT_AHEAD;
+  }
+  if (options.flags & DOKAN_OPTION_FCB_AVL_TABLE) {
+    mount_request->Flags |= DOKAN_EVENT_FCB_AVL_TABLE;
+  }
   memcpy_s(mount_request->MountPoint, sizeof(mount_request->MountPoint),
            requested_mount_point.c_str(),
            requested_mount_point.size() * sizeof(wchar_t));
@@ -145,7 +148,8 @@ void PrepareReply(NTSTATUS status, EVENT_CONTEXT* request, FileHandle* handle,
 size_t ComputeVarReplySize(size_t buffer_size) {
   return std::max(
       sizeof(EVENT_INFORMATION),
-      sizeof(EVENT_INFORMATION) - 8 + buffer_size);
+      static_cast<size_t>(FIELD_OFFSET(EVENT_INFORMATION, Buffer[0]) +
+                          buffer_size));
 }
 
 // Constructs a reply whose size is bigger than the declared size of
@@ -159,14 +163,14 @@ util::UniqueVarStructPtr<EVENT_INFORMATION> PrepareVarReply(
   auto reply = util::MakeUniqueVarStruct<EVENT_INFORMATION>(size);
   reply->SerialNumber = request->SerialNumber;
   reply->Context = request->Context;
-  reply->BufferLength = size - (sizeof(EVENT_INFORMATION) - 8);
+  reply->BufferLength = size - FIELD_OFFSET(EVENT_INFORMATION, Buffer[0]);
   return reply;
 }
 
 }  // anonymous namespace
 
 const ULONG FileSystem::kMaxReadSize =
-    0xffffffff - (sizeof(EVENT_INFORMATION) - 8);
+    0xffffffff - FIELD_OFFSET(EVENT_INFORMATION, Buffer[0]);
 
 FileSystem::FileSystem(FileCallbacks* file_callbacks,
                        VolumeCallbacks* volume_callbacks,
@@ -195,11 +199,6 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
   allow_request_batching_ = allow_full_batching
       || (startup_options_.flags & DOKAN_OPTION_ALLOW_REQUEST_BATCHING);
   io_buffer_.resize(EVENT_CONTEXT_MAX_SIZE * (allow_request_batching_ ? 4 : 1));
-  use_fsctl_events_ = startup_options_.flags & DOKAN_OPTION_USE_FSCTL_EVENTS;
-  if (use_fsctl_events_) {
-    global_device_.SetDesiredAccess(0);
-    device_.SetDesiredAccess(0);
-  }
   io_thread_id_ = GetCurrentThreadId();
   change_handler_.reset(new ChangeHandler(file_callbacks_, logger_));
   file_info_handler_.reset(
@@ -220,11 +219,8 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
     return MountResult::FAILED_TO_PREPARE_MOUNT_REQUEST;
   }
   EVENT_DRIVER_INFO mount_response = {0};
-  ULONG ioctl = IOCTL_EVENT_START;
-#ifdef NEXT_DOKANCC_RELEASE
-  ioctl = use_fsctl_events_ ? FSCTL_EVENT_START : IOCTL_EVENT_START;
-#endif
-  bool request_sent = global_device_.Control(ioctl, mount_request, &mount_response);
+  bool request_sent =
+      global_device_.Control(FSCTL_EVENT_START, mount_request, &mount_response);
   if (!request_sent || mount_response.Status != DOKAN_MOUNTED) {
     // Give the driver log subscriber time to get events back related to the
     // failure. There isn't a good way to guarantee delivery of everything that
@@ -240,8 +236,11 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
     if (!util::CheckDriverVersion(mount_response.DriverVersion, logger_)) {
       return MountResult::DRIVER_VERSION_MISMATCH;
     }
-    DOKAN_LOG_(ERROR) << "Generic mount error returned from driver.";
-    return MountResult::GENERIC_FAILURE;
+    DOKAN_LOG_(ERROR) << "Generic mount error returned from driver with Flags: "
+                      << mount_response.Flags;
+    return mount_response.Flags & DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED
+               ? MountResult::NO_MOUNT_POINT_ASSIGNED
+               : MountResult::GENERIC_FAILURE;
   }
   if (mount_response.Status != DOKAN_MOUNTED) {
     DOKAN_LOG_(ERROR) << "Unrecognized result from driver; assuming failure: "
@@ -268,7 +267,7 @@ MountResult FileSystem::Mount(const std::wstring& requested_mount_point,
   mounted_ = true;
   reply_handler_.reset(new ReplyHandler(&device_, logger_,
                                         startup_options_.reply_thread_count,
-                                        allow_full_batching, use_fsctl_events_));
+                                        allow_full_batching));
   volume_callbacks_->Mounted(this);
   DOKAN_LOG_(INFO) << "Mounted callback returned.";
   post_start_thread_.reset(new std::thread([this] {
@@ -342,12 +341,7 @@ void FileSystem::AssertNotCalledOnIoThread() const {
 }
 
 bool FileSystem::GetVolumeMetrics(VOLUME_METRICS* output) {
-  ULONG ioctl = IOCTL_GET_VOLUME_METRICS;
-#ifdef NEXT_DOKANCC_RELEASE
-  ioctl =
-      use_fsctl_events_ ? FSCTL_GET_VOLUME_METRICS : IOCTL_GET_VOLUME_METRICS;
-#endif
-  return device_.ControlWithOutputOnly(ioctl, output);
+  return device_.ControlWithOutputOnly(FSCTL_GET_VOLUME_METRICS, output);
 }
 
 void FileSystem::Unmount() {
@@ -355,11 +349,7 @@ void FileSystem::Unmount() {
     return;
   }
   DOKAN_LOG_(INFO) << "Unmounting the file system.";
-  ULONG ioctl = IOCTL_EVENT_RELEASE;
-#ifdef NEXT_DOKANCC_RELEASE
-  ioctl = use_fsctl_events_ ? FSCTL_EVENT_RELEASE : IOCTL_EVENT_RELEASE;
-#endif
-  if (device_.Control(ioctl)) {
+  if (device_.Control(FSCTL_EVENT_RELEASE)) {
     DOKAN_LOG_(INFO) << "Sent unmount request to driver.";
   } else {
     DOKAN_LOG_(INFO) << "Failed to send unmount request to driver.";
@@ -417,11 +407,7 @@ bool FileSystem::ReceiveIo() {
     MaybeFinishUnmount();
     return false;
   }
-  ULONG ioctl = IOCTL_EVENT_WAIT;
-#ifdef NEXT_DOKANCC_RELEASE
-  ioctl = use_fsctl_events_ ? FSCTL_EVENT_WAIT : IOCTL_EVENT_WAIT;
-#endif
-  if (!device_.ControlAsync(ioctl, &io_buffer_, &overlapped_)) {
+  if (!device_.ControlAsync(FSCTL_EVENT_WAIT, &io_buffer_, &overlapped_)) {
     util::SetAndNotify(&mutex_, &state_, &io_stopped_);
     DOKAN_LOG_(INFO) << "The file system has stopped receiving I/O.";
     MaybeFinishUnmount();
@@ -536,9 +522,7 @@ FileSystem::DispatchFn FileSystem::GetDispatchFn(ULONG major_irp_function) {
     case IRP_MJ_READ: return &FileSystem::DispatchRead;
     case IRP_MJ_WRITE: return &FileSystem::DispatchWrite;
     case IRP_MJ_FLUSH_BUFFERS: return &FileSystem::DispatchFlush;
-#ifdef NEXT_DOKANCC_RELEASE
     case DOKAN_IRP_LOG_MESSAGE: return &FileSystem::DispatchDriverLogs;
-#endif
     default: return nullptr;
   }
 }
@@ -1040,11 +1024,7 @@ void FileSystem::DispatchWrite(EVENT_CONTEXT* raw_request) {
     pending_requests_.insert(request.get());
     pending_requests_.erase(raw_request);
     raw_request = request.get();
-    ULONG ioctl = IOCTL_EVENT_WRITE;
-#ifdef NEXT_DOKANCC_RELEASE
-    ioctl = use_fsctl_events_ ? FSCTL_EVENT_WRITE : IOCTL_EVENT_WRITE;
-#endif
-    bool result = device_.Control(ioctl, reply_with_buffer,
+    bool result = device_.Control(FSCTL_EVENT_WRITE, reply_with_buffer,
                                   reinterpret_cast<char*>(request.get()),
                                   var_request_size);
     if (!result) {
@@ -1096,7 +1076,6 @@ void FileSystem::CompleteWrite(
   RemoveReference(&handle);
 }
 
-#ifdef NEXT_DOKANCC_RELEASE
 void FileSystem::DispatchDriverLogs(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();
 
@@ -1116,7 +1095,6 @@ void FileSystem::DispatchDriverLogs(EVENT_CONTEXT* request) {
 
   RequestCompleted(request);
 }
-#endif
 
 void FileSystem::DispatchFlush(EVENT_CONTEXT* request) {
   AssertCalledOnIoThread();

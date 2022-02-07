@@ -35,6 +35,7 @@ struct FileInfo {
   FILETIME last_access_time;
   FILETIME last_write_time;
   uint64_t file_size;
+  uint64_t file_index;
 };
 
 // The data returned by the FileCallbacks::FindFiles function for each
@@ -81,4 +82,4 @@ struct FileTimes {
 
 }  // namespace dokan
 
-#endif // DOKAN_FILE_INFO_H_
+#endif  // DOKAN_FILE_INFO_H_

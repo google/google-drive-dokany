@@ -3,7 +3,7 @@ Signature         = "$Windows NT$"
 Class             = DiskDrive
 ClassGuid         = {4d36e967-e325-11ce-bfc1-08002be10318}
 Provider          = %ProviderName%
-DriverVer         = 04/05/2021,3.460.2100.0
+DriverVer         = 01/28/2022,3.758.1741.0
 CatalogFile       = %DriverName%.cat
 DriverPackageType = FileSystem
 
@@ -28,7 +28,7 @@ DelService = %DriverName%,0x200
 1 = %Disk1%
 
 [SourceDisksFiles]
-googledrivefs3460.sys = 1
+googledrivefs3758.sys = 1
 
 [DokanFileSystem.DriverFiles]
 %DriverName%.sys
@@ -51,7 +51,7 @@ HKR,,TypesSupported,0x00010001,7
 
 [Strings]
 ProviderName       = "Google"
-DriverName         = "googledrivefs3460"
-DriverVersion      = "04/05/2021,3.460.2100.0"
+DriverName         = "googledrivefs3758"
+DriverVersion      = "01/28/2022,3.758.1741.0"
 Disk1              = "Google Drive installation media"
 ServiceDescription = "Google Drive kernel-mode file system driver."

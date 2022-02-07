@@ -52,7 +52,6 @@ PDokanCCB DokanAllocateCCB(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB 
 
   ccb->Fcb = Fcb;
   DOKAN_LOG_FINE_IRP(RequestContext, "Allocated CCB");
-  ExInitializeResourceLite(&ccb->Resource);
 
   InitializeListHead(&ccb->NextCCB);
 
@@ -106,8 +105,6 @@ DokanFreeCCB(__in PREQUEST_CONTEXT RequestContext, __in PDokanCCB ccb) {
   }
 
   DokanFCBUnlock(fcb);
-
-  ExDeleteResourceLite(&ccb->Resource);
 
   if (ccb->SearchPattern) {
     ExFreePool(ccb->SearchPattern);
@@ -329,7 +326,8 @@ Otherwise, STATUS_SHARING_VIOLATION is returned.
 VOID DokanRetryCreateAfterOplockBreak(__in PVOID Context, __in PIRP Irp) {
   REQUEST_CONTEXT requestContext;
   NTSTATUS status =
-      DokanBuildRequestContext((PDEVICE_OBJECT)Context, Irp, &requestContext);
+      DokanBuildRequestContext((PDEVICE_OBJECT)Context, Irp,
+                               /*IsTopLevelIrp=*/FALSE, &requestContext);
   if (!NT_SUCCESS(status)) {
     DOKAN_LOG_("Failed to build request context for IRP=%p Status=%s", Irp,
                DokanGetNTSTATUSStr(status));
@@ -633,6 +631,7 @@ Return Value:
       RtlCopyMemory((PCHAR)fileName + relatedFileName->Length +
                         (needBackSlashAfterRelatedFile ? sizeof(WCHAR) : 0),
                     fileObject->FileName.Buffer, fileObject->FileName.Length);
+      DOKAN_LOG_FINE_IRP(RequestContext, "Absolute FileName=\"%ls\"", fileName);
     } else {
       // if related file object is not specified, copy the file name of file
       // object
@@ -678,13 +677,9 @@ Return Value:
           fileName = NULL;
           __leave;
         }
-        fcb = DokanGetFCB(
-            RequestContext, parentDir, parentDirLength,
-            FlagOn(RequestContext->IrpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(RequestContext, parentDir, parentDirLength);
       } else {
-        fcb = DokanGetFCB(
-            RequestContext, fileName, fileNameLength,
-            FlagOn(RequestContext->IrpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(RequestContext, fileName, fileNameLength);
       }
       if (fcb == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;

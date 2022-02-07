@@ -25,63 +25,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "util/str.h"
 
 VOID DokanUnmount(__in_opt PREQUEST_CONTEXT RequestContext, __in PDokanDCB Dcb) {
-  ULONG eventLength;
-  PEVENT_CONTEXT eventContext;
-  PDRIVER_EVENT_CONTEXT driverEventContext;
-  PKEVENT completedEvent;
-  LARGE_INTEGER timeout;
   PDokanVCB vcb = Dcb->Vcb;
-  ULONG deviceNamePos;
 
   DOKAN_LOG("Start");
-
-  eventLength = sizeof(EVENT_CONTEXT);
-  eventContext = AllocateEventContextRaw(eventLength);
-
-  if (eventContext == NULL) {
-    DOKAN_LOG("Not able to allocate eventContext.");
-    if (vcb) {
-      DokanEventRelease(RequestContext, vcb->DeviceObject);
-    }
-    return;
-  }
-
-  driverEventContext =
-      CONTAINING_RECORD(eventContext, DRIVER_EVENT_CONTEXT, EventContext);
-  completedEvent = DokanAlloc(sizeof(KEVENT));
-  if (completedEvent) {
-    KeInitializeEvent(completedEvent, NotificationEvent, FALSE);
-    driverEventContext->Completed = completedEvent;
-  }
-
-  deviceNamePos = Dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-  deviceNamePos = DokanSearchWcharinUnicodeStringWithUlong(
-      Dcb->SymbolicLinkName, L'\\', deviceNamePos, 0);
-
-  RtlStringCchCopyW(eventContext->Operation.Unmount.DeviceName,
-                    sizeof(eventContext->Operation.Unmount.DeviceName) /
-                        sizeof(WCHAR),
-                    &(Dcb->SymbolicLinkName->Buffer[deviceNamePos]));
-
-  DOKAN_LOG_("Send Unmount to Service : %ws",
-             eventContext->Operation.Unmount.DeviceName);
-
-  DokanEventNotification(&Dcb->Global->NotifyService, eventContext);
-
-  if (completedEvent) {
-    timeout.QuadPart = -1 * 10 * 1000 * 10; // 10 sec
-    KeWaitForSingleObject(completedEvent, Executive, KernelMode, FALSE,
-                          &timeout);
-  }
-
   if (vcb) {
     DokanEventRelease(RequestContext, vcb->DeviceObject);
   }
-
-  if (completedEvent) {
-    ExFreePool(completedEvent);
-  }
-
   DOKAN_LOG("End");
 }
 
@@ -297,11 +246,9 @@ Routine Description:
       waitObj = FALSE;
     } else {
       KeClearEvent(&Dcb->ForceTimeoutEvent);
-      // in this case the timer was executed and we are checking if the timer
+      // In this case the timer was executed and we are checking if the timer
       // occurred regulary using the period DOKAN_CHECK_INTERVAL. If not, this
-      // means the system was in sleep mode. If in this case the timer is
-      // faster awaken than the incoming IOCTL_KEEPALIVE
-      // the MountPoint would be removed by mistake (DokanCheckKeepAlive).
+      // means the system was in sleep mode.
       KeQuerySystemTime(&CurrentTime);
       if ((CurrentTime.QuadPart - LastTime.QuadPart) >
           ((DOKAN_CHECK_INTERVAL + 2000) * 10000)) {

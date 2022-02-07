@@ -29,49 +29,52 @@ enum StartupFlags {
   // Enable the use of alternate stream paths in the form
   // <file-name>:<stream-name>. If this is not specified then the driver will
   // fail any attempt to access a path with a colon.
-  DOKAN_OPTION_ALT_STREAM = 4,
+  DOKAN_OPTION_ALT_STREAM = (1 << 0),
 
   // Use the FILE_READ_ONLY_DEVICE device characteristic when mounting.
-  DOKAN_OPTION_WRITE_PROTECT = 8,
+  DOKAN_OPTION_WRITE_PROTECT = (1 << 1),
 
   // Use the FILE_REMOVABLE_MEDIA device characteristic when mounting.
-  DOKAN_OPTION_REMOVABLE = 32,
+  DOKAN_OPTION_REMOVABLE = (1 << 2),
 
   // Enable the invocation of user-mode file locking callbacks. If this is not
   // specified, then the driver uses FsRtlCheckOplock and related functions to
   // implement locking.
-  DOKAN_OPTION_FILELOCK_USER_MODE = 256,
+  DOKAN_OPTION_FILELOCK_USER_MODE = (1 << 3),
 
   // Enable logging of abnormally long kernel lock acquisition waits. This is
   // detrimental to performance and should not be enabled in normal use.
-  DOKAN_OPTION_LOCK_DEBUG_ENABLED = 512,
+  DOKAN_OPTION_LOCK_DEBUG_ENABLED = (1 << 4),
 
   // Whether the driver should log oplock requests. This may be detrimental to
   // preformance and should not be enabled in normal use.
-  DOKAN_OPTION_LOG_OPLOCKS = 16384,
-
-  // Suppress the copying of file names from the kernel to dokancc in requests
-  // where dokancc does not use them. This should be the default behavior, but
-  // historically was not an option.
-  DOKAN_OPTION_SUPPRESS_FILE_NAME_IN_EVENT_CONTEXT = 32768,
+  DOKAN_OPTION_LOG_OPLOCKS = (1 << 5),
 
   // Don't lock the FCB in the driver for paging I/O IRPs where it is not
   // already bypassed by the above flag.
-  DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED = 65536,
+  DOKAN_OPTION_ASSUME_PAGING_IO_IS_LOCKED = (1 << 6),
 
   // Allow more than one request to be passed per kernel-to-user message.
-  DOKAN_OPTION_ALLOW_REQUEST_BATCHING = 131072,
+  DOKAN_OPTION_ALLOW_REQUEST_BATCHING = (1 << 7),
 
   // Allow more than one request and reply to be passed per kernel-to-user
   // message. This implies DOKAN_OPTION_ALLOW_REQUEST_BATCHING and it's
   // irrelevant whether that is also set.
-  DOKAN_OPTION_ALLOW_FULL_BATCHING = 262144,
+  DOKAN_OPTION_ALLOW_FULL_BATCHING = (1 << 8),
 
   // Forward the kernel driver global and volume logs to the userland.
-  DOKAN_OPTION_DISPATCH_DRIVER_LOGS = 524288,
+  DOKAN_OPTION_DISPATCH_DRIVER_LOGS = (1 << 9),
+  // Disable FileNetworkPhysicalNameInformation query on files.The
+  // FileInformationClass query will directly result in STATUS_INVALID_PARAMETER
+  // failure instead of being resolved by the driver.
+  DOKAN_OPTION_DISABLE_NETWORK_PHYSICAL_QUERY = (1 << 10),
 
-  // Send Event of type FILE_DEVICE_FILE_SYSTEM instead of FILE_DEVICE_UNKNOWN.
-  DOKAN_OPTION_USE_FSCTL_EVENTS = 1048576
+  // Allow I/O requests to be pulled directly by FSCTL_EVENT_WAIT when available
+  // instead of waiting to be woken up by the system thread.
+  DOKAN_OPTION_PULL_EVENT_AHEAD = (1 << 11),
+
+  // Store the DokanFCB instances in the Avl table instead of the LIST_ENTRY.
+  DOKAN_OPTION_FCB_AVL_TABLE = (1 << 12)
 };
 
 // The options for mounting a FileSystem.

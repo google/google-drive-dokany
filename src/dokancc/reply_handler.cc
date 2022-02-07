@@ -33,12 +33,11 @@ const size_t kMaxReplyBatchByteSize = 1024 * 1024 * 1024;
 }  // namespace
 
 ReplyHandler::ReplyHandler(Device* device, Logger* logger, size_t thread_count,
-                           bool allow_batching, bool use_fsctl_events)
+                           bool allow_batching)
     : device_(device),
       logger_(logger),
       threads_(thread_count),
-      allow_batching_(allow_batching),
-      use_fsctl_events_(use_fsctl_events) {
+      allow_batching_(allow_batching) {
   for (size_t i = 0; i < thread_count; ++i) {
     threads_[i].reset(new std::thread(std::bind(&ReplyHandler::Run, this)));
   }
@@ -146,11 +145,9 @@ bool ReplyHandler::SendReplies(const std::map<uint64_t, Reply>& replies) {
   if (replies.empty()) {
     return true;
   }
-  ULONG ioctl = IOCTL_EVENT_INFO;
-  ioctl = use_fsctl_events_ ? FSCTL_EVENT_INFO : IOCTL_EVENT_INFO;
   if (replies.size() == 1) {
     const Reply& reply = replies.begin()->second;
-    return device_->Control(ioctl, reply.data.get(), reply.size);
+    return device_->Control(FSCTL_EVENT_INFO, reply.data.get(), reply.size);
   }
   size_t total_size = 0;
   bool batchable = true;
@@ -167,7 +164,7 @@ bool ReplyHandler::SendReplies(const std::map<uint64_t, Reply>& replies) {
     // that, and it could be too large; just serialize it.
     bool result = true;
     for (const auto& [key, reply] : replies) {
-      if (!device_->Control(ioctl, reply.data.get(), reply.size)) {
+      if (!device_->Control(FSCTL_EVENT_INFO, reply.data.get(), reply.size)) {
         result = false;
       }
     }
@@ -181,7 +178,7 @@ bool ReplyHandler::SendReplies(const std::map<uint64_t, Reply>& replies) {
            reinterpret_cast<const char*>(reply.data.get()), reply.size);
     offset += reply.size;
   }
-  return device_->Control(ioctl, batch.data(), total_size);
+  return device_->Control(FSCTL_EVENT_INFO, batch.data(), total_size);
 }
 
 }  // namespace dokan

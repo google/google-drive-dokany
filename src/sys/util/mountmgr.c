@@ -21,8 +21,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "mountmgr.h"
 
 NTSTATUS
-DokanSendIoContlToMountManager(__in ULONG IoControlCode, __in PVOID InputBuffer,
-                               __in ULONG Length, __out PVOID OutputBuffer,
+DokanSendIoContlToMountManager(__in ULONG IoControlCode,
+                               __in_opt PVOID InputBuffer, __in ULONG Length,
+                               __out PVOID OutputBuffer,
                                __in ULONG OutputLength) {
   NTSTATUS status;
   UNICODE_STRING mountManagerName;
@@ -254,7 +255,6 @@ DokanSendVolumeCreatePoint(__in PDRIVER_OBJECT DriverObject,
 NTSTATUS DokanQueryAutoMount(PBOOLEAN State) {
   NTSTATUS status;
   MOUNTMGR_QUERY_AUTO_MOUNT queryAutoMount;
-
 
   status =
       DokanSendIoContlToMountManager(IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT, NULL, 0,

@@ -19,7 +19,6 @@ class NotificationHandlerImpl : public NotificationHandler {
       : fs_(fs),
         logger_(logger),
         notification_handle_(logger) {
-    notification_handle_.SetDesiredAccess(0);
   }
 
   bool NotifyCreate(const std::wstring& path, bool directory) override {

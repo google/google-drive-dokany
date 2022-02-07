@@ -88,11 +88,8 @@ void ChangeHandler::ChangeName(
     FileHandle* handle,
     EVENT_INFORMATION* reply,
     const util::StatusCallback& callback) {
-  const bool full_path = info.FileName[0] == '\\';
-  const std::wstring provided_name(
-      info.FileName, info.FileNameLength / sizeof(wchar_t));
-  const std::wstring new_full_path = full_path ? provided_name :
-      util::ReplaceLastPathComponent(handle->path(), provided_name);
+  const std::wstring new_full_path(info.FileName,
+                                   info.FileNameLength / sizeof(wchar_t));
   callbacks_->Move(
       handle, new_full_path, info.ReplaceIfExists,
       [=, &info](NTSTATUS status) {

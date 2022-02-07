@@ -33,14 +33,17 @@ const wchar_t kGroupAdminsSddl[] = L"G:BA";
 
 const auto kParams = testing::Values(
     kCallbackSync,
-    kCallbackAsyncEphemeralThread,
     // Current DriveFS prod config.
-    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
-        kAllowRequestBatching | kFcbGarbageCollection,
+    kCallbackAsyncEphemeralThread | kAllowRequestBatching |
+        kFcbGarbageCollection |
+        kDisabledNetworkPhysicalNameQuery,
     // Likely next DriveFS prod config.
-    kCallbackAsyncEphemeralThread | kSuppressFileNameInEventContext |
-        kAssumePagingIoIsLocked | kAllowRequestBatching | kAllowFullBatching |
-        kFcbGarbageCollection | kDispatchDriverLogs | kUseFsctlEvents);
+    kCallbackAsyncEphemeralThread | kAllowRequestBatching |
+        kFcbGarbageCollection |
+        kDisabledNetworkPhysicalNameQuery |
+        // New possible prod config
+        kAllowFullBatching | kAssumePagingIoIsLocked | kDispatchDriverLogs |
+        kPullEventAhead | kStoreFcbAvlTable);
 
 class MountTest : public FileSystemTestBase {};
 
@@ -176,7 +179,8 @@ TEST_P(MountTest, MountAndFakeDriveReassignment) {
         mountdev_name_buffer.data());
     mountdev_name->NameLength = name_length;
     wcscpy(mountdev_name->Name, name.c_str());
-    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    std::unique_ptr<Device> device =
+        helper_.OpenDevice(fs, GENERIC_READ | GENERIC_WRITE);
     ASSERT_NE(device, nullptr);
     EXPECT_TRUE(device->Control(IOCTL_MOUNTDEV_LINK_CREATED, mountdev_name,
                                 mountdev_name_buffer.size()));
@@ -188,10 +192,7 @@ TEST_P(MountTest, MountAndFakeDriveReassignment) {
     drive_to_delete.Length = sizeof(wchar_t);
     drive_to_delete.MaximumLength = drive_to_delete.Length;
     drive_to_delete.Buffer[0] = 'Q';
-    ULONG ioctl = IOCTL_EVENT_RELEASE;
-    ioctl = (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_RELEASE
-                                           : IOCTL_EVENT_RELEASE;
-    EXPECT_TRUE(global_device.Control(ioctl, drive_to_delete));
+    EXPECT_TRUE(global_device.Control(FSCTL_EVENT_RELEASE, drive_to_delete));
   });
 
   EXPECT_TRUE(helper_.unmounted());
@@ -214,6 +215,16 @@ TEST_P(MountTest, MountDirectory) {
   EXPECT_TRUE(helper.unmounted());
   EXPECT_TRUE(RemoveDirectory(mount_point.c_str()));
   // Note that errors from PostStart may be logged during this test.
+}
+
+TEST_P(MountTest, MountInvalidDirectory) {
+  const std::wstring mount_point = L"C:\\FileNotAMountPoint.txt";
+  HANDLE mount_point_handle = CreateFile(
+      mount_point.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+  CloseHandle(mount_point_handle);
+  EXPECT_EQ(fs_->Mount(mount_point, options_),
+            MountResult::NO_MOUNT_POINT_ASSIGNED);
 }
 
 TEST_P(MountTest, MountAndGetVolumeSizeBeforeEventWait) {
@@ -395,7 +406,118 @@ TEST_P(OpenCloseTest, GoodFileNameCaseAfterBadCase) {
   });
 }
 
+NTSTATUS OpenRelativeFile(HANDLE handle_root,
+                          const std::wstring& relative_file_name,
+                          PHANDLE handle_file,
+                          ULONG DesiredAccess = SYNCHRONIZE | GENERIC_READ,
+                          ULONG ShareAccess = 0) {
+  OBJECT_ATTRIBUTES attributes_file;
+  IO_STATUS_BLOCK iosb_file;
+  memset(&attributes_file, 0, sizeof(OBJECT_ATTRIBUTES));
+  memset(&iosb_file, 0, sizeof(IO_STATUS_BLOCK));
+  UNICODE_STRING name_file;
+  RtlInitUnicodeString(&name_file, relative_file_name.c_str());
+  attributes_file.Length = sizeof(OBJECT_ATTRIBUTES);
+  attributes_file.ObjectName = &name_file;
+  attributes_file.RootDirectory = handle_root;
+  return NtCreateFile(handle_file, DesiredAccess, &attributes_file,
+                      &iosb_file,
+                      /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+                      ShareAccess, FILE_OPEN, /*CreateOptions=*/0,
+                      /*EaBuffer=*/nullptr, /*EaLength=*/0);
+}
+
+NTSTATUS OpenFile(const std::wstring& file_name, PHANDLE handle_file,
+                  ULONG DesiredAccess = FILE_ALL_ACCESS) {
+  OBJECT_ATTRIBUTES attributes_dir;
+  IO_STATUS_BLOCK iosb_dir;
+  memset(&attributes_dir, 0, sizeof(OBJECT_ATTRIBUTES));
+  memset(&iosb_dir, 0, sizeof(IO_STATUS_BLOCK));
+  UNICODE_STRING name_dir;
+  const std::wstring full_dir_name = L"\\??\\" + file_name;
+  RtlInitUnicodeString(&name_dir, full_dir_name.c_str());
+  attributes_dir.Length = sizeof(OBJECT_ATTRIBUTES);
+  attributes_dir.ObjectName = &name_dir;
+  return NtCreateFile(handle_file, DesiredAccess, &attributes_dir, &iosb_dir,
+                      /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+                      /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      FILE_OPEN,
+                      FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+                      /*EaBuffer=*/nullptr, /*EaLength=*/0);
+}
+
 TEST_P(OpenCloseTest, RelativeFile) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  const wchar_t stream_name[] = L":Zone.Identifier";
+  options_.flags |= StartupFlags::DOKAN_OPTION_ALT_STREAM;
+  callbacks_->SetUpFile(dir_path);
+  callbacks_->SetUpFile(file_path);
+  callbacks_->SetUpFile(std::wstring(file_path) +
+                        std::wstring(stream_name));
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES attributes_dir;
+    IO_STATUS_BLOCK iosb_dir;
+    memset(&attributes_dir, 0, sizeof(OBJECT_ATTRIBUTES));
+    memset(&iosb_dir, 0, sizeof(IO_STATUS_BLOCK));
+    UNICODE_STRING name_dir;
+    const std::wstring full_dir_name = L"\\??\\" + mount_point_ + dir_path;
+    RtlInitUnicodeString(&name_dir, full_dir_name.c_str());
+    attributes_dir.Length = sizeof(OBJECT_ATTRIBUTES);
+    attributes_dir.ObjectName = &name_dir;
+    NTSTATUS status = NtCreateFile(
+        &handle_dir, FILE_LIST_DIRECTORY, &attributes_dir,
+        &iosb_dir,
+        /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+        /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+        /*EaBuffer=*/nullptr, /*EaLength=*/0);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    // Open child file with relative name with non relative path
+    status = OpenRelativeFile(handle_dir, L"\\file.txt", &handle_file);
+    EXPECT_EQ(STATUS_INVALID_PARAMETER, status);
+
+    // Open child file with relative name
+    status = OpenRelativeFile(handle_dir, L"file.txt", &handle_file);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    HANDLE handle_stream = INVALID_HANDLE_VALUE;
+    // Open stream with file as relative path
+    status = OpenRelativeFile(handle_file, stream_name, &handle_stream);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    NtClose(handle_stream);
+
+    HANDLE duplicate_handle_file = INVALID_HANDLE_VALUE;
+    // Open a new handle to an existing FILE_OBJECT
+    // Failure is expected as the previous open has ShareAccess 0
+    status = OpenRelativeFile(handle_file, L"", &duplicate_handle_file);
+    EXPECT_EQ(STATUS_SHARING_VIOLATION, status);
+
+    // TODO(adrienj): This is used when the caller wants to open a new handle to
+    // an existing FILE_OBJECT. This is not the same as opening a new handle to
+    // the existing FILE_OBJECT (duplicating the handle) because the end result
+    // of this is to open a new FILE_OBJECT for the same underlying stream, and
+    // the two FILE_OBJECTs are not linked in any other way.
+    /*NtClose(handle_file);
+    status = OpenRelativeFile(handle_dir, L"file.txt", &handle_file,
+                              SYNCHRONIZE | GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    status = OpenRelativeFile(handle_file, L"", &duplicate_handle_file);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    NtClose(duplicate_handle_file);*/
+    NtClose(handle_file);
+
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(OpenCloseTest, RelativeFileSameFCB) {
   const wchar_t dir_path[] = L"\\dir";
   const wchar_t file_path[] = L"\\dir\\file.txt";
   callbacks_->SetUpFile(dir_path);
@@ -424,44 +546,20 @@ TEST_P(OpenCloseTest, RelativeFile) {
 
     // Open child file with relative name
     HANDLE handle_file = INVALID_HANDLE_VALUE;
-    OBJECT_ATTRIBUTES attributes_file;
-    IO_STATUS_BLOCK iosb_file;
-    memset(&attributes_file, 0, sizeof(OBJECT_ATTRIBUTES));
-    memset(&iosb_file, 0, sizeof(IO_STATUS_BLOCK));
-    UNICODE_STRING name_file;
-    const std::wstring relative_file_name = L"file.txt";
-    RtlInitUnicodeString(&name_file, relative_file_name.c_str());
-    attributes_file.Length = sizeof(OBJECT_ATTRIBUTES);
-    attributes_file.ObjectName = &name_file;
-    attributes_file.RootDirectory = handle_dir;
-    status = NtCreateFile(&handle_file, FILE_ALL_ACCESS, &attributes_file,
-                          &iosb_file,
-                          /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
-                          /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE,
-                          FILE_OPEN, FILE_NON_DIRECTORY_FILE,
-                          /*EaBuffer=*/nullptr, /*EaLength=*/0);
-    EXPECT_EQ(STATUS_SUCCESS, status);
+    OpenRelativeFile(handle_dir, L"file.txt", &handle_file);
+
+    HANDLE handle2 = CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    // STATUS_SHARING_VIOLATION expected here as handle_file ShareAccess is 0
+    EXPECT_EQ(INVALID_HANDLE_VALUE, handle2);
     NtClose(handle_file);
 
-    // Open child file with leading backslash (not relative path)
-    HANDLE handle_incorrect_file = INVALID_HANDLE_VALUE;
-    OBJECT_ATTRIBUTES attributes_incorrect_file;
-    IO_STATUS_BLOCK iosb_incorrect_file;
-    memset(&attributes_incorrect_file, 0, sizeof(OBJECT_ATTRIBUTES));
-    memset(&iosb_incorrect_file, 0, sizeof(IO_STATUS_BLOCK));
-    UNICODE_STRING name_incorrect_file;
-    const std::wstring non_relative_file_name = L"\\file.txt";
-    RtlInitUnicodeString(&name_incorrect_file, non_relative_file_name.c_str());
-    attributes_incorrect_file.Length = sizeof(OBJECT_ATTRIBUTES);
-    attributes_incorrect_file.ObjectName = &name_incorrect_file;
-    attributes_incorrect_file.RootDirectory = handle_dir;
-    status = NtCreateFile(&handle_incorrect_file, FILE_ALL_ACCESS,
-                          &attributes_incorrect_file, &iosb_incorrect_file,
-                          /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
-                          /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE,
-                          FILE_OPEN, FILE_NON_DIRECTORY_FILE,
-                          /*EaBuffer=*/nullptr, /*EaLength=*/0);
-    EXPECT_EQ(STATUS_INVALID_PARAMETER, status);
+    handle2 = CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle2);
+    CloseHandle(handle2);
 
     NtClose(handle_dir);
     fs->Unmount();
@@ -555,14 +653,15 @@ TEST_P(VolumeInfoTest, GetVolumeMetrics) {
     VOLUME_METRICS metrics;
     EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
     EXPECT_GT(metrics.FcbAllocations, 0);
-    EXPECT_LT(metrics.FcbDeletions, metrics.FcbAllocations);
+    EXPECT_LE(metrics.FcbDeletions, metrics.FcbAllocations);
     fs->Unmount();
   });
 }
 
 TEST_P(VolumeInfoTest, GetVolumeLabelCount) {
   RunFS([&](FileSystem* fs) {
-    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    std::unique_ptr<Device> device =
+        helper_.OpenDevice(fs, GENERIC_READ | GENERIC_WRITE);
     VOLUME_METRICS metrics;
     EXPECT_TRUE(fs->GetVolumeMetrics(&metrics));
     EXPECT_EQ(metrics.FsctlVolumeLabelCount, 0);
@@ -606,7 +705,9 @@ TEST_P(MetadataTest, GetInfo_IdInfo) {
     return;
   }
   const wchar_t path[] = L"\\test_GetInfo_IdInfo";
-  callbacks_->SetUpFile(path);
+  FileInfo data_to_return = {0};
+  data_to_return.file_index = 0x123456789123456;
+  callbacks_->SetUpFile(path, data_to_return);
   RunFS([&](FileSystem* fs) {
     HANDLE handle = Open(path, GENERIC_READ);
     FILE_ID_INFO info = {0};
@@ -614,8 +715,19 @@ TEST_P(MetadataTest, GetInfo_IdInfo) {
                                                sizeof(info));
     EXPECT_TRUE(result);
     EXPECT_EQ(options_.volume_serial_number, info.VolumeSerialNumber);
-    // The system appears to replace dokan's zero value for result.FileId
-    // with something we can't predict.
+    FILE_ID_128 expected_fileid;
+    memset(&expected_fileid, 0, sizeof(expected_fileid));
+    expected_fileid.Identifier[0] = 0x56;
+    expected_fileid.Identifier[1] = 0x34;
+    expected_fileid.Identifier[2] = 0x12;
+    expected_fileid.Identifier[3] = 0x89;
+    expected_fileid.Identifier[4] = 0x67;
+    expected_fileid.Identifier[5] = 0x45;
+    expected_fileid.Identifier[6] = 0x23;
+    expected_fileid.Identifier[7] = 0x01;
+    EXPECT_TRUE(0 == std::memcmp(&info.FileId.Identifier,
+                                 &expected_fileid.Identifier,
+                                 sizeof(expected_fileid.Identifier)));
     fs->Unmount();
   });
 }
@@ -639,7 +751,14 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
   const wchar_t path[] = L"\\test_GetInfo_NameInfo_Overflow";
   callbacks_->SetUpFile(path);
   RunFS([&](FileSystem* fs) {
+    const ULONG base_size = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
     HANDLE handle = Open(path, GENERIC_READ);
+
+    // Note: Sending a buffer size of FIELD_OFFSET(FILE_NAME_INFORMATION,
+    // FileName) is a valid buffer overflow that would just set FileNameLength
+    // but we cannot test it as ntdll block the request before it goes to the
+    // driver.
+
     auto info = util::MakeUniqueVarStruct<FILE_NAME_INFORMATION>(1024);
     IO_STATUS_BLOCK iosb;
     memset(&iosb, 0, sizeof(iosb));
@@ -647,7 +766,7 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
         handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION),
         FileNameInformation);
     EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 2);
     EXPECT_EQ(L"\\t", std::wstring(info->FileName, 2));
     EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
 
@@ -658,7 +777,7 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
         handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 1,
         FileNameInformation);
     EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 2);
     EXPECT_EQ(L"\\t", std::wstring(info->FileName, 2));
     EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
 
@@ -669,7 +788,7 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
         handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 2,
         FileNameInformation);
     EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 2);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 3);
     EXPECT_EQ(L"\\te", std::wstring(info->FileName, 3));
     EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
 
@@ -680,7 +799,7 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
         handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 3,
         FileNameInformation);
     EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 2);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 3);
     EXPECT_EQ(L"\\te", std::wstring(info->FileName, 3));
     EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
 
@@ -691,7 +810,7 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Overflow) {
         handle, &iosb, info.get(), sizeof(FILE_NAME_INFORMATION) + 4,
         FileNameInformation);
     EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION) + 4);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 4);
     EXPECT_EQ(L"\\tes", std::wstring(info->FileName, 4));
     EXPECT_EQ(info->FileNameLength, wcslen(path) * sizeof(wchar_t));
     CloseHandle(handle);
@@ -709,9 +828,10 @@ TEST_P(MetadataTest, GetInfo_NameInfo_Root) {
     NTSTATUS status = NtQueryInformationFile(
         handle, &iosb, &info, sizeof(info), FileNameInformation);
     EXPECT_EQ(status, STATUS_SUCCESS);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(iosb.Information,
+              FIELD_OFFSET(FILE_NAME_INFORMATION, FileName) + sizeof(WCHAR));
     EXPECT_EQ(std::wstring(info.FileName, 1), L"\\");
-    EXPECT_EQ(info.FileNameLength, 2);
+    EXPECT_EQ(info.FileNameLength, sizeof(WCHAR));
     CloseHandle(handle);
     fs->Unmount();
   });
@@ -729,9 +849,74 @@ TEST_P(MetadataTest, GetInfo_NameInfo_SingleCharName) {
     NTSTATUS status = NtQueryInformationFile(
         handle, &iosb, &info, sizeof(info), FileNameInformation);
     EXPECT_EQ(status, STATUS_SUCCESS);
-    EXPECT_EQ(iosb.Information, sizeof(FILE_NAME_INFORMATION));
+    EXPECT_EQ(iosb.Information, FIELD_OFFSET(FILE_NAME_INFORMATION, FileName) +
+                                    sizeof(WCHAR) * 2);
     EXPECT_EQ(std::wstring(info.FileName, 2), L"\\x");
-    EXPECT_EQ(info.FileNameLength, 4);
+    EXPECT_EQ(info.FileNameLength, sizeof(WCHAR) * 2);
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_NetworkPhysicalName) {
+  const wchar_t path[] = L"\\my_file.txt";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    auto info =
+        util::MakeUniqueVarStruct<FILE_NETWORK_PHYSICAL_NAME_INFORMATION>(1024);
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(
+        handle, &iosb, info.get(), 1024, FileNetworkPhysicalNameInformation);
+    if (GetParam() & kDisabledNetworkPhysicalNameQuery) {
+      EXPECT_EQ(status, STATUS_INVALID_PARAMETER);
+    } else {
+      EXPECT_EQ(status, STATUS_SUCCESS);
+      EXPECT_EQ(info->FileNameLength, 0);
+    }
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_AllInfo_Root) {
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = helper_.OpenFSRootDirectory();
+    FILE_ALL_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(handle, &iosb, &info, sizeof(info),
+                                             FileAllInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_EQ(iosb.Information,
+              FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName) +
+                  sizeof(WCHAR));
+    EXPECT_EQ(std::wstring(info.NameInformation.FileName, 1), L"\\");
+    EXPECT_EQ(info.NameInformation.FileNameLength, sizeof(WCHAR));
+    CloseHandle(handle);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_AllInfo_SingleCharName) {
+  const wchar_t path[] = L"\\x";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    FILE_ALL_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(handle, &iosb, &info, sizeof(info),
+                                             FileAllInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_EQ(iosb.Information,
+              FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName) +
+                  sizeof(WCHAR) * 2);
+    EXPECT_EQ(std::wstring(info.NameInformation.FileName, 2), L"\\x");
+    EXPECT_EQ(info.NameInformation.FileNameLength, sizeof(WCHAR) * 2);
     CloseHandle(handle);
     fs->Unmount();
   });
@@ -813,6 +998,165 @@ TEST_P(MetadataTest, GetInfo_CompressionInfo) {
                                                &info, sizeof(info));
     EXPECT_FALSE(result);
     EXPECT_EQ(ERROR_INVALID_PARAMETER, GetLastError());
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_AllInfo) {
+  const wchar_t path[] = L"\\test_GetInfo_AllInfo";
+  FileInfo data_to_return = {0};
+  data_to_return.file_size = 0x0000000100004359;
+  data_to_return.file_index = 0x1234;
+  data_to_return.creation_time.dwHighDateTime = 0x11111111;
+  data_to_return.creation_time.dwLowDateTime = 0x22222222;
+  data_to_return.last_write_time.dwHighDateTime = 0x33333333;
+  data_to_return.last_write_time.dwLowDateTime = 0x44444444;
+  data_to_return.last_access_time.dwHighDateTime = 0x55555555;
+  data_to_return.last_access_time.dwLowDateTime = 0x66666666;
+  data_to_return.file_attributes = FILE_ATTRIBUTE_HIDDEN;
+  callbacks_->SetUpFile(path, data_to_return);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    auto info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(handle, &iosb, info.get(), 1024,
+                                             FileAllInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_GT(iosb.Information, sizeof(FILE_ALL_INFORMATION));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+    EXPECT_EQ(path, std::wstring(info->NameInformation.FileName,
+                                 info->NameInformation.FileNameLength /
+                                     sizeof(wchar_t)));
+
+    EXPECT_FALSE(info->StandardInformation.DeletePending);
+    EXPECT_FALSE(info->StandardInformation.Directory);
+    EXPECT_EQ(1, info->StandardInformation.AllocationSize.HighPart);
+    EXPECT_EQ(17408, info->StandardInformation.AllocationSize.LowPart);
+    EXPECT_EQ(1, info->StandardInformation.EndOfFile.HighPart);
+    EXPECT_EQ(17241, info->StandardInformation.EndOfFile.LowPart);
+    EXPECT_EQ(0x11111111, info->BasicInformation.CreationTime.HighPart);
+    EXPECT_EQ(0x22222222, info->BasicInformation.CreationTime.LowPart);
+    EXPECT_EQ(0x33333333, info->BasicInformation.LastWriteTime.HighPart);
+    EXPECT_EQ(0x44444444, info->BasicInformation.LastWriteTime.LowPart);
+    EXPECT_EQ(0x55555555, info->BasicInformation.LastAccessTime.HighPart);
+    EXPECT_EQ(0x66666666, info->BasicInformation.LastAccessTime.LowPart);
+    EXPECT_EQ(FILE_ATTRIBUTE_HIDDEN, info->BasicInformation.FileAttributes);
+    EXPECT_EQ(data_to_return.file_index,
+              info->InternalInformation.IndexNumber.QuadPart);
+
+    CloseHandle(handle);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_AllInfo_Overflow) {
+  const wchar_t path[] = L"\\test_GetInfo_AllInfo";
+  callbacks_->SetUpFile(path);
+  RunFS([&](FileSystem* fs) {
+    const ULONG base_size =
+        FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName);
+    // Same as GetInfo_NameInfo_Overflow but for FILE_ALL_INFORMATION
+
+    // Note: Sending a buffer size of FIELD_OFFSET(FILE_ALL_INFORMATION,
+    // NameInformation.FileName) is a valid buffer overflow that would just set
+    // FileNameLength but we cannot test it as ntdll block the request before it
+    // goes to the driver.
+    HANDLE handle = Open(path, GENERIC_READ);
+    auto info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(handle, &iosb, info.get(),
+                                             sizeof(FILE_ALL_INFORMATION),
+                                             FileAllInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 2);
+    EXPECT_EQ(L"\\t", std::wstring(info->NameInformation.FileName, 2));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+
+    // You can't get half a character back.
+    info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(handle, &iosb, info.get(),
+                                    sizeof(FILE_ALL_INFORMATION) + 1,
+                                    FileAllInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 2);
+    EXPECT_EQ(L"\\t", std::wstring(info->NameInformation.FileName, 2));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+
+    // Get back 1 character more than the fixed size of the struct.
+    info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(handle, &iosb, info.get(),
+                                    sizeof(FILE_ALL_INFORMATION) + 2,
+                                    FileAllInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 3);
+    EXPECT_EQ(L"\\te", std::wstring(info->NameInformation.FileName, 3));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+
+    // You can't get back 1.5 characters.
+    info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(handle, &iosb, info.get(),
+                                    sizeof(FILE_ALL_INFORMATION) + 3,
+                                    FileAllInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 3);
+    EXPECT_EQ(L"\\te", std::wstring(info->NameInformation.FileName, 3));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+
+    // Get back 2 more than the fixed size of the struct.
+    info = util::MakeUniqueVarStruct<FILE_ALL_INFORMATION>(1024);
+    memset(&iosb, 0, sizeof(iosb));
+    status = NtQueryInformationFile(handle, &iosb, info.get(),
+                                    sizeof(FILE_ALL_INFORMATION) + 4,
+                                    FileAllInformation);
+    EXPECT_EQ(status, STATUS_BUFFER_OVERFLOW);
+    EXPECT_EQ(iosb.Information, base_size + sizeof(WCHAR) * 4);
+    EXPECT_EQ(L"\\tes", std::wstring(info->NameInformation.FileName, 4));
+    EXPECT_EQ(info->NameInformation.FileNameLength,
+              wcslen(path) * sizeof(wchar_t));
+    CloseHandle(handle);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MetadataTest, GetInfo_InternalInfo) {
+  const wchar_t path[] = L"\\test_InternalInfo_AllInfo";
+  FileInfo data_to_return = {0};
+  data_to_return.file_size = 0x0000000100004359;
+  data_to_return.file_index = 0x1234;
+  data_to_return.creation_time.dwHighDateTime = 0x11111111;
+  data_to_return.creation_time.dwLowDateTime = 0x22222222;
+  data_to_return.last_write_time.dwHighDateTime = 0x33333333;
+  data_to_return.last_write_time.dwLowDateTime = 0x44444444;
+  data_to_return.last_access_time.dwHighDateTime = 0x55555555;
+  data_to_return.last_access_time.dwLowDateTime = 0x66666666;
+  data_to_return.file_attributes = FILE_ATTRIBUTE_HIDDEN;
+  callbacks_->SetUpFile(path, data_to_return);
+  RunFS([&](FileSystem* fs) {
+    HANDLE handle = Open(path, GENERIC_READ);
+    FILE_INTERNAL_INFORMATION data{0};
+    IO_STATUS_BLOCK iosb;
+    memset(&iosb, 0, sizeof(iosb));
+    NTSTATUS status = NtQueryInformationFile(handle, &iosb, &data,
+                                             sizeof(FILE_INTERNAL_INFORMATION),
+                                             FileInternalInformation);
+    EXPECT_EQ(status, STATUS_SUCCESS);
+    EXPECT_EQ(iosb.Information, sizeof(FILE_INTERNAL_INFORMATION));
+    EXPECT_EQ(data_to_return.file_index, data.IndexNumber.QuadPart);
+
+    CloseHandle(handle);
+
     fs->Unmount();
   });
 }
@@ -1249,6 +1593,687 @@ TEST_P(MoveDeleteTest, Move_Replace_DestExists) {
     EXPECT_TRUE(result);
     EXPECT_FALSE(callbacks_->file_exists(source));
     EXPECT_TRUE(callbacks_->file_exists(dest));
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, Move_Replace_DestExistsWithFcbGC) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t source[] = L"\\dir\\file";
+  const wchar_t dest[] = L"\\dir\\file2";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(source);
+  callbacks_->SetUpFile(dest);
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \dir
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dir);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dir, L"file", &handle_file,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open handle on destination to generate a Fcb GC
+    HANDLE handle_file2 =
+        CreateFile((mount_point_ + dest).c_str(), 0,
+                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle_file2);
+    CloseHandle(handle_file2);
+
+    // \dir\file -> \dir\file2
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength = wcslen(L"file2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2",
+           file_rename_information->FileNameLength);
+    file_rename_information->ReplaceIfExists = TRUE;
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\file2"));
+
+    NtClose(handle_file);
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, Move_Replace_DestExistsWithOpenedHandle) {
+  // Replacing a file with an existing handle open even with FILE_SHARE_DELETE
+  // is denied on NTFS. A Dokan bug makes it possible so this test just exists
+  // to cover the code that handles the Fcb being replaced.
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t source[] = L"\\dir\\file";
+  const wchar_t dest[] = L"\\dir\\file2";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(source);
+  callbacks_->SetUpFile(dest);
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \dir
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dir);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dir, L"file", &handle_file,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open handle on destination file with delete shared
+    HANDLE handle_file2 =
+        CreateFile((mount_point_ + dest).c_str(), 0,
+                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    EXPECT_NE(INVALID_HANDLE_VALUE, handle_file2);
+
+    // \dir\file -> \dir\file2
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength = wcslen(L"file2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2",
+           file_rename_information->FileNameLength);
+    file_rename_information->ReplaceIfExists = TRUE;
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);  // NTFS - STATUS_ACCESS_DENIED
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\file2"));
+
+    CloseHandle(handle_file2);
+    NtClose(handle_file);
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, FullyQualifiedRename) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t dir3_path[] = L"\\dir3";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  const wchar_t file_renamed_path[] = L"\\dir3\\file2.txt";
+  const wchar_t file_root_path[] = L"\\root_file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir3_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // \dir\file.txt -> \dir3\file2.txt
+    EXPECT_TRUE(MoveFile((mount_point_ + file_path).c_str(),
+                         (mount_point_ + file_renamed_path).c_str()));
+    EXPECT_TRUE(callbacks_->file_exists(file_renamed_path));
+
+    // \dir -> \dir2
+    EXPECT_TRUE(MoveFile((mount_point_ + dir_path).c_str(),
+                         (mount_point_ + dir2_path).c_str()));
+    EXPECT_TRUE(callbacks_->file_exists(dir2_path));
+
+    WCHAR current_directory[MAX_PATH];
+    EXPECT_TRUE(GetCurrentDirectory(MAX_PATH, current_directory) > 0);
+    EXPECT_TRUE(SetCurrentDirectory((mount_point_ + dir3_path).c_str()));
+    // cd \dir3 : \dir3\file2.txt -> \file.txt
+    // This is endup still being a fully qualified rename.
+    EXPECT_TRUE(MoveFile(L"file2.txt", L"..\\file.txt"));
+    EXPECT_TRUE(callbacks_->file_exists(L"\\file.txt"));
+    EXPECT_TRUE(SetCurrentDirectory(current_directory));
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, SimpleFileRename) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \dir
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dir);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dir, L"file.txt", &handle_file,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir\file2.txt
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength =
+        wcslen(L"file2.txt") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2.txt",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\file2.txt"));
+
+    NtClose(handle_file);
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, SimpleDirectoryRename) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t sub_dir[] = L"\\dir\\sub_dir";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(sub_dir);
+  RunFS([&](FileSystem* fs) {
+    //NTSTATUS status;
+
+    // Open parent directory - \dir
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dir);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child dir with relative name - \dir\sub_dir
+    HANDLE handle_sub_dir = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dir, L"sub_dir", &handle_sub_dir,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\sub_dir -> \dir\sub_dir2
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength =
+        wcslen(L"sub_dir2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"sub_dir2",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_sub_dir, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\sub_dir2"));
+
+    NtClose(handle_sub_dir);
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, SimpleRenameEndingWithBackslash) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \dir
+    HANDLE handle_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dir);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dir, L"file.txt", &handle_file,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir\file2.txt (\dir\file2.txt\)
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength =
+        wcslen(L"file2.txt\\") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2.txt\\",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\file2.txt"));
+
+    NtClose(handle_file);
+    NtClose(handle_dir);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeRename) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir2_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    // Open destination directory - \dir2
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir2_path, &handle_dest_dir,
+                               SYNCHRONIZE | FILE_ADD_FILE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir2\file.txt
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L"file2.txt") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2.txt",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir2\\file2.txt"));
+
+    NtClose(handle_dest_dir);
+    CloseHandle(handle_file);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeRenameWithDeviceAsRootDirectory) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir2_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    // Open dokan device
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES attributes_dir;
+    IO_STATUS_BLOCK iosb_dir;
+    memset(&attributes_dir, 0, sizeof(OBJECT_ATTRIBUTES));
+    memset(&iosb_dir, 0, sizeof(IO_STATUS_BLOCK));
+    UNICODE_STRING name_dir;
+    const std::wstring raw_device_name = L"\\Device" + fs_->device_name();
+    RtlInitUnicodeString(&name_dir, raw_device_name.c_str());
+    attributes_dir.Length = sizeof(OBJECT_ATTRIBUTES);
+    attributes_dir.ObjectName = &name_dir;
+    NTSTATUS status = NtCreateFile(
+        &handle_dest_dir, SYNCHRONIZE /*| FILE_ADD_FILE*/, &attributes_dir,
+        &iosb_dir,
+        /*AllocationSize=*/nullptr, /*FileAttributes=*/0,
+        /*ShareAccess=*/FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+        /*EaBuffer=*/nullptr, /*EaLength=*/0);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir2\file.txt
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L"\\dir2\\file2.txt") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"\\dir2\\file2.txt",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir2\\file2.txt"));
+
+    NtClose(handle_dest_dir);
+    CloseHandle(handle_file);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeRenameEndingWithBackslash) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir2_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    // Open destination directory - \dir2
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir2_path, &handle_dest_dir,
+                               SYNCHRONIZE | FILE_ADD_FILE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir2\file2.txt (\dir2\file2.txt\)
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L"file2.txt\\") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2.txt\\",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir2\\file2.txt"));
+
+    NtClose(handle_dest_dir);
+    CloseHandle(handle_file);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeRenameWithRelativeRootDirectory) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir2_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    // Open parent directory - \dir
+    HANDLE handle_dest_root = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + L"\\", &handle_dest_root);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_dest_root, L"dir2", &handle_dest_dir,
+                              SYNCHRONIZE | FILE_ADD_FILE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir2\file.txt
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L"file2.txt") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file2.txt",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir2\\file2.txt"));
+
+    NtClose(handle_dest_dir);
+    NtClose(handle_dest_root);
+    CloseHandle(handle_file);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeRenameWithRelativeRootDirWithOpenTargetDir) {
+  // This is how WSL2 rename files with: mv dir/file.txt dir2/file2.txt
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t dir2_path[] = L"\\dir2";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpDir(dir2_path);
+  callbacks_->SetUpFile(file_path);
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \dir
+    HANDLE handle_root = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + L"\\", &handle_root);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open child file with relative name - \dir\file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_root, L"dir\\file.txt", &handle_file,
+                              DELETE | SYNCHRONIZE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \dir\file.txt -> \dir2\file.txt
+    // This rename is special as the filename also include a directory path.
+    // This will produce a CreateFile request on dir2\file2.txt relative to \
+    // with SL_OPEN_TARGET_DIRECTORY
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_root;
+    file_rename_information->FileNameLength =
+        wcslen(L"dir2\\file2.txt") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"dir2\\file2.txt",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir2\\file2.txt"));
+
+    NtClose(handle_file);
+    NtClose(handle_root);
+
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeStreamRename) {
+  // It is a weird case that is not supported by NTFS but we are capable to
+  // process it
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  const wchar_t file_stream1_path[] = L"\\dir\\file.txt:stream1";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(file_path);
+  callbacks_->SetUpFile(file_stream1_path);
+  options_.flags |= StartupFlags::DOKAN_OPTION_ALT_STREAM;
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt:stream1
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   +FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    // Open destination directory - \dir1
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dest_dir,
+                               +SYNCHRONIZE | FILE_ADD_FILE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    // \dir\file.txt:stream1 -> \dir\file2.txt:stream2
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L"file.txt:stream2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L"file.txt:stream2",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\dir\\file.txt:stream2"));
+    NtClose(handle_dest_dir);
+    CloseHandle(handle_file);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, RelativeInvalidStreamRename) {
+  const wchar_t dir_path[] = L"\\dir";
+  const wchar_t file_path[] = L"\\dir\\file.txt";
+  const wchar_t file_stream1_path[] = L"\\dir\\file.txt:stream1";
+  callbacks_->SetUpDir(dir_path);
+  callbacks_->SetUpFile(file_path);
+  callbacks_->SetUpFile(file_stream1_path);
+  options_.flags |= StartupFlags::DOKAN_OPTION_ALT_STREAM;
+  RunFS([&](FileSystem* fs) {
+    // Open file \dir\file.txt
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   +FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    // Open destination directory - \dir1
+    HANDLE handle_dest_dir = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + dir_path, &handle_dest_dir,
+                               +SYNCHRONIZE | FILE_ADD_FILE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    // \dir\file.txt:stream1 -> \dir\:stream2 <- INVALID
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->RootDirectory = handle_dest_dir;
+    file_rename_information->FileNameLength =
+        wcslen(L":stream2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L":stream2",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_INVALID_PARAMETER, status);
+    EXPECT_FALSE(callbacks_->file_exists(L"\\dir\\file.txt:stream2"));
+    NtClose(handle_dest_dir);
+    CloseHandle(handle_file);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, SimpleStreamRename) {
+  const wchar_t file_path[] = L"\\file.txt";
+  const wchar_t file_stream1_path[] = L"\\file.txt:stream1";
+  callbacks_->SetUpFile(file_path);
+  callbacks_->SetUpFile(file_stream1_path);
+  options_.flags |= StartupFlags::DOKAN_OPTION_ALT_STREAM;
+  RunFS([&](FileSystem* fs) {
+    // Open parent directory - \file.txt
+    HANDLE handle_file = INVALID_HANDLE_VALUE;
+    NTSTATUS status = OpenFile(mount_point_ + file_path, &handle_file);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // Open attached stream with relative name - \file.txt:stream1
+    HANDLE handle_file_stream = INVALID_HANDLE_VALUE;
+    status = OpenRelativeFile(handle_file, L":stream1", &handle_file_stream,
+                     DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+
+    // \file.txt:stream1 -> \file.txt:stream2
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength =
+        wcslen(L":stream2") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L":stream2",
+           file_rename_information->FileNameLength);
+    status = NtSetInformationFile(
+        handle_file_stream, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(L"\\file.txt:stream2"));
+
+    NtClose(handle_file_stream);
+    NtClose(handle_file);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MoveDeleteTest, SimpleMainStreamRename) {
+  const wchar_t file_path[] = L"\\file.txt";
+  const wchar_t file_stream1_path[] = L"\\file.txt:stream1";
+  callbacks_->SetUpFile(file_path);
+  options_.flags |= StartupFlags::DOKAN_OPTION_ALT_STREAM;
+  RunFS([&](FileSystem* fs) {
+    // Open \file.txt main stream without the $DATA stream name
+    HANDLE handle_file =
+        CreateFile((mount_point_ + file_path).c_str(), GENERIC_READ | DELETE,
+                   FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    // \file.txt -> \file.txt:stream1
+    IO_STATUS_BLOCK iosb_rename_file;
+    memset(&iosb_rename_file, 0, sizeof(IO_STATUS_BLOCK));
+    std::vector<uint8_t> buffer(sizeof(FILE_RENAME_INFORMATION) + MAX_PATH);
+    PFILE_RENAME_INFORMATION file_rename_information =
+        (PFILE_RENAME_INFORMATION)buffer.data();
+    file_rename_information->FileNameLength =
+        wcslen(L":stream1") * sizeof(WCHAR);
+    memcpy(file_rename_information->FileName, L":stream1",
+           file_rename_information->FileNameLength);
+    NTSTATUS status = NtSetInformationFile(
+        handle_file, &iosb_rename_file, file_rename_information,
+        FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+            file_rename_information->FileNameLength,
+        FileRenameInformation);
+    EXPECT_EQ(STATUS_SUCCESS, status);
+    EXPECT_TRUE(callbacks_->file_exists(file_stream1_path));
+
+    NtClose(handle_file);
     fs->Unmount();
   });
 }
@@ -1814,7 +2839,7 @@ TEST_P(MemorySafetyTest, GlobalReleaseBufferOverflow) {
   *(WORD*)buffer = 0x320;
   *(WORD*)(buffer + 2) = 0x31a;
   *(uint64_t*)(buffer + 776) = 0x4242424242424242;
-  ASSERT_FALSE(device.Control(0x222010, buffer, sizeof(buffer)));
+  ASSERT_FALSE(device.Control(FSCTL_EVENT_RELEASE, buffer, sizeof(buffer)));
   ASSERT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
 }
 
@@ -1822,10 +2847,7 @@ TEST_P(MemorySafetyTest, EventStartTooSmall) {
   Device device(logger_);
   ASSERT_TRUE(device.OpenGlobalDevice());
   EVENT_START buffer;
-  ULONG ioctl = IOCTL_EVENT_START;
-  ioctl =
-      (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_START : IOCTL_EVENT_START;
-  ASSERT_FALSE(device.Control(ioctl, &buffer, sizeof(buffer) - 1));
+  ASSERT_FALSE(device.Control(FSCTL_EVENT_START, &buffer, sizeof(buffer) - 1));
   EXPECT_EQ(GetLastError(), ERROR_NO_SYSTEM_RESOURCES);
 }
 
@@ -1834,10 +2856,8 @@ TEST_P(MemorySafetyTest, EventInfoTooSmall) {
     std::unique_ptr<Device> device = helper_.OpenDevice(fs);
     ASSERT_NE(device, nullptr);
     EVENT_INFORMATION buffer;
-    ULONG ioctl = IOCTL_EVENT_INFO;
-    ioctl =
-        (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_INFO : IOCTL_EVENT_INFO;
-    EXPECT_FALSE(device->Control(ioctl, &buffer, sizeof(buffer) - 1));
+    EXPECT_FALSE(
+        device->Control(FSCTL_EVENT_INFO, &buffer, sizeof(buffer) - 1));
     EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
     fs->Unmount();
   });
@@ -1848,23 +2868,21 @@ TEST_P(MemorySafetyTest, EventWriteTooSmall) {
     std::unique_ptr<Device> device = helper_.OpenDevice(fs);
     ASSERT_NE(device, nullptr);
     EVENT_INFORMATION buffer;
-    ULONG ioctl = IOCTL_EVENT_WRITE;
-    ioctl =
-        (GetParam() & kUseFsctlEvents) ? FSCTL_EVENT_WRITE : IOCTL_EVENT_WRITE;
-    EXPECT_FALSE(device->Control(ioctl, &buffer, sizeof(buffer) - 1));
+    EXPECT_FALSE(
+        device->Control(FSCTL_EVENT_WRITE, &buffer, sizeof(buffer) - 1));
     EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
     fs->Unmount();
   });
 }
 
 TEST_P(MemorySafetyTest, MountdevNameTooSmall) {
-  RunFS([&] (FileSystem* fs) {
+  RunFS([&](FileSystem* fs) {
     std::unique_ptr<Device> device = helper_.OpenDevice(fs);
     ASSERT_NE(device, nullptr);
     MOUNTDEV_NAME buffer;
-    EXPECT_FALSE(device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME,
-                                               &buffer,
-                                               sizeof(buffer) - 1));
+    EXPECT_FALSE(
+        device->ControlWithOutputOnly(IOCTL_MOUNTDEV_QUERY_DEVICE_NAME, &buffer,
+                                      FIELD_OFFSET(MOUNTDEV_NAME, Name) - 1));
     EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
     fs->Unmount();
   });
@@ -1931,7 +2949,8 @@ TEST_P(MemorySafetyTest, SuggestedLinkNameTooSmall) {
 
     // With no space for a name, it should give us the length.
     EXPECT_FALSE(device->ControlWithOutputOnly(
-        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, &buffer, sizeof(buffer) - 1));
+        IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME, &buffer,
+        FIELD_OFFSET(MOUNTDEV_SUGGESTED_LINK_NAME, Name) - 1));
     EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
     EXPECT_EQ(buffer.NameLength, 0);
     fs->Unmount();
@@ -2003,11 +3022,20 @@ TEST_P(MemorySafetyTest, VolumeMetricsTooSmall) {
   RunFS([&](FileSystem* fs) {
     std::unique_ptr<Device> device = helper_.OpenDevice(fs);
     VOLUME_METRICS metrics;
-    ULONG ioctl = IOCTL_GET_VOLUME_METRICS;
-    ioctl = (GetParam() & kUseFsctlEvents) ? FSCTL_GET_VOLUME_METRICS
-                                           : IOCTL_GET_VOLUME_METRICS;
+    EXPECT_FALSE(device->ControlWithOutputOnly(FSCTL_GET_VOLUME_METRICS,
+                                               &metrics, sizeof(metrics) - 1));
+    EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
+    fs->Unmount();
+  });
+}
+
+TEST_P(MemorySafetyTest, IoctlInputBreak) {
+  RunFS([&](FileSystem* fs) {
+    std::unique_ptr<Device> device = helper_.OpenDevice(fs);
+    // GET_IRP_BUFFER_OR_BREAK should break on this.
+    char data[100];
     EXPECT_FALSE(
-        device->ControlWithOutputOnly(ioctl, &metrics, sizeof(metrics) - 1));
+        device->ControlWithOutputOnly(IOCTL_STORAGE_QUERY_PROPERTY, data, 100));
     EXPECT_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);
     fs->Unmount();
   });
@@ -2018,16 +3046,8 @@ INSTANTIATE_TEST_CASE_P(MemorySafetyTests, MemorySafetyTest,
 
 class DisabledFunctionTest : public FileSystemTestBase {};
 
-TEST_P(DisabledFunctionTest, IoctlGetVersion) {
-  CheckInvalidFunction(IOCTL_GET_VERSION);
-}
-
 TEST_P(DisabledFunctionTest, FsctlGetVersion) {
   CheckInvalidFunction(FSCTL_GET_VERSION);
-}
-
-TEST_P(DisabledFunctionTest, IoctlEventMountpointList) {
-  CheckInvalidFunction(IOCTL_EVENT_MOUNTPOINT_LIST);
 }
 
 TEST_P(DisabledFunctionTest, FsctlEventMountpointList) {
@@ -2042,16 +3062,8 @@ TEST_P(DisabledFunctionTest, IoctlRedirQueryPathEx) {
   CheckInvalidFunction(IOCTL_REDIR_QUERY_PATH_EX);
 }
 
-TEST_P(DisabledFunctionTest, IoctlResetTimeout) {
-  CheckInvalidFunction(IOCTL_RESET_TIMEOUT);
-}
-
 TEST_P(DisabledFunctionTest, FsctlResetTimeout) {
   CheckInvalidFunction(FSCTL_RESET_TIMEOUT);
-}
-
-TEST_P(DisabledFunctionTest, IoctlGetAccessToken) {
-  CheckInvalidFunction(IOCTL_GET_ACCESS_TOKEN);
 }
 
 TEST_P(DisabledFunctionTest, FsctlGetAccessToken) {
